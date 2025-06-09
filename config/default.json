@@ -1,0 +1,26 @@
+{
+  "modbus": {
+    "port": "/dev/ttyUSB0",
+    "baudRate": 9600,
+    "parity": "none",
+    "timeout": 1000
+  },
+  "flowmeters": {
+    "devices": [
+      {
+        "address": 1,
+        "name": "Flowmeter 1",
+        "description": "Main engine fuel flow"
+      },
+      {
+        "address": 2,
+        "name": "Flowmeter 2", 
+        "description": "Auxiliary engine fuel flow"
+      }
+    ],
+    "monitoring": {
+      "intervalMs": 5000,
+      "retryAttempts": 3
+    }
+  }
+}
