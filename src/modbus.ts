@@ -42,7 +42,7 @@ class BL410ModbusReader {
    * @param baudRate Baud rate (default: 9600)
    * @param parity Parity setting (default: 'none')
    */
-  async connect(port: string = '/dev/ttyS0', baudRate: number = 9600, parity: 'none' | 'even' | 'odd' = 'none'): Promise<void> {
+  async connect(port: string = '/dev/ttyS0', baudRate: number = 9600, parity: 'even'): Promise<void> {
     try {
       console.log(`Connecting to RS485 port: ${port}`);
       console.log(`Baud rate: ${baudRate}, Parity: ${parity}`);
@@ -67,11 +67,12 @@ class BL410ModbusReader {
 
   /**
    * Convert two 16-bit registers to a 32-bit integer (Big Endian)
-   * Mimics the Lua bit manipulation: (arg[i] << 8 | arg[i+1]) << 16 | (arg[i+2] << 8 | arg[i+3])
+   * For 2-register values (32-bit) - FIXED VERSION
    */
   private registers32ToInt(registers: number[], startIndex: number): number {
-    const high16 = (registers[startIndex] << 8) | registers[startIndex + 1];
-    const low16 = (registers[startIndex + 2] << 8) | registers[startIndex + 3];
+    // Use only 2 registers for 32-bit value
+    const high16 = registers[startIndex];
+    const low16 = registers[startIndex + 1];
     return (high16 << 16) | low16;
   }
 
@@ -113,30 +114,39 @@ class BL410ModbusReader {
         throw new Error(`Expected ${registerCount} registers, got ${registers.length}`);
       }
 
+      console.log(`Raw registers: [${registers.join(', ')}]`); // Debug log
+
       // Parse data according to Sealand flowmeter register mapping
+      // Each 32-bit value uses 2 consecutive 16-bit registers
       const flowmeterData: FlowmeterData = {
         deviceAddress,
         timestamp: new Date(),
-        // Error code: registers 0-3 (32-bit)
-        errorCode: this.registers32ToInt(registers, 2),
-        // Mass flow rate: registers 4-7 (32-bit float)
-        massFlowRate: this.int32ToFloat(this.registers32ToInt(registers, 4)),
-        // Density flow: registers 8-11 (32-bit float)
-        densityFlow: this.int32ToFloat(this.registers32ToInt(registers, 8)),
-        // Temperature: registers 12-15 (32-bit float)
-        temperature: this.int32ToFloat(this.registers32ToInt(registers, 12)),
-        // Volume flow rate: registers 16-19 (32-bit float)
-        volumeFlowRate: this.int32ToFloat(this.registers32ToInt(registers, 16)),
-        // Mass total: registers 28-31 would be at index 20-23, but we only read 22 registers
-        // Adjusting based on the 22-register window
-        massTotal: registers.length > 20 ? this.int32ToFloat(this.registers32ToInt(registers, 20)) : 0,
-        // Volume total: would be next 4 registers
-        volumeTotal: 0, // Not available in 22-register window
-        // Mass inventory: would be next 4 registers  
-        massInventory: 0, // Not available in 22-register window
-        // Volume inventory: would be next 4 registers
-        volumeInventory: 0 // Not available in 22-register window
+        // Error code: registers 0-1 (32-bit, 2 registers)
+        errorCode: this.registers32ToInt(registers, 0),
+        // Mass flow rate: registers 2-3 (32-bit float, 2 registers)
+        massFlowRate: this.int32ToFloat(this.registers32ToInt(registers, 2)),
+        // Density flow: registers 4-5 (32-bit float, 2 registers)
+        densityFlow: this.int32ToFloat(this.registers32ToInt(registers, 4)),
+        // Temperature: registers 6-7 (32-bit float, 2 registers)
+        temperature: this.int32ToFloat(this.registers32ToInt(registers, 6)),
+        // Volume flow rate: registers 8-9 (32-bit float, 2 registers)
+        volumeFlowRate: this.int32ToFloat(this.registers32ToInt(registers, 8)),
+        // Mass total: registers 10-11 (32-bit float, 2 registers)
+        massTotal: this.int32ToFloat(this.registers32ToInt(registers, 10)),
+        // Volume total: registers 12-13 (32-bit float, 2 registers)
+        volumeTotal: this.int32ToFloat(this.registers32ToInt(registers, 12)),
+        // Mass inventory: registers 14-15 (32-bit float, 2 registers)
+        massInventory: this.int32ToFloat(this.registers32ToInt(registers, 14)),
+        // Volume inventory: registers 16-17 (32-bit float, 2 registers)
+        volumeInventory: this.int32ToFloat(this.registers32ToInt(registers, 16))
       };
+
+      console.log(`Parsed data:`, {
+        errorCode: flowmeterData.errorCode,
+        massFlowRate: flowmeterData.massFlowRate,
+        temperature: flowmeterData.temperature,
+        volumeFlowRate: flowmeterData.volumeFlowRate
+      }); // Debug log
 
       return flowmeterData;
 
@@ -160,26 +170,28 @@ class BL410ModbusReader {
       
       // Read extended register range to get all data
       const startAddress = 245 - this.flowmeterRegOffset;
-      const registerCount = 44; // Extended to include all data
+      const registerCount = 22; // Keep same as basic read for consistency
       
       console.log(`📊 Reading complete flowmeter data from device ${deviceAddress}`);
       
       const result = await this.client.readHoldingRegisters(startAddress, registerCount);
       const registers = result.data;
 
-      // Parse complete data set
+      console.log(`Complete raw registers: [${registers.join(', ')}]`); // Debug log
+
+      // Parse complete data set with correct 2-register mapping
       const flowmeterData: FlowmeterData = {
         deviceAddress,
         timestamp: new Date(),
         errorCode: this.registers32ToInt(registers, 0),
-        massFlowRate: this.int32ToFloat(this.registers32ToInt(registers, 4)),
-        densityFlow: this.int32ToFloat(this.registers32ToInt(registers, 8)),
-        temperature: this.int32ToFloat(this.registers32ToInt(registers, 12)),
-        volumeFlowRate: this.int32ToFloat(this.registers32ToInt(registers, 16)),
-        massTotal: this.int32ToFloat(this.registers32ToInt(registers, 28)),
-        volumeTotal: this.int32ToFloat(this.registers32ToInt(registers, 32)),
-        massInventory: this.int32ToFloat(this.registers32ToInt(registers, 36)),
-        volumeInventory: this.int32ToFloat(this.registers32ToInt(registers, 40))
+        massFlowRate: this.int32ToFloat(this.registers32ToInt(registers, 2)),
+        densityFlow: this.int32ToFloat(this.registers32ToInt(registers, 4)),
+        temperature: this.int32ToFloat(this.registers32ToInt(registers, 6)),
+        volumeFlowRate: this.int32ToFloat(this.registers32ToInt(registers, 8)),
+        massTotal: this.int32ToFloat(this.registers32ToInt(registers, 10)),
+        volumeTotal: this.int32ToFloat(this.registers32ToInt(registers, 12)),
+        massInventory: this.int32ToFloat(this.registers32ToInt(registers, 14)),
+        volumeInventory: this.int32ToFloat(this.registers32ToInt(registers, 16))
       };
 
       return flowmeterData;
@@ -375,7 +387,7 @@ async function main() {
     console.log('');
 
     // Connect to RS485
-    await reader.connect('/dev/ttyS0', 9600, 'none');
+    await reader.connect('/dev/ttyS0', 9600, 'even');
 
     // Example: Read data from flowmeter devices (adjust addresses as needed)
     const flowmeterAddresses = [1, 2, 3, 4]; // Device addresses from your system
