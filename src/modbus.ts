@@ -90,6 +90,180 @@ class BL410ModbusReader {
   }
 
   /**
+   * Calculate Modbus CRC-16 checksum
+   * Adapted from tt_modbus service CRC method
+   * @param data Array of bytes to calculate CRC for
+   * @returns CRC-16 value
+   */
+  private calculateModbusCRC(data: number[]): number {
+    const poly = 0xA001;
+    let crc = 0xFFFF;
+
+    for (let i = 0; i < data.length; i++) {
+      crc = crc ^ data[i];
+      for (let j = 0; j < 8; j++) {
+        if ((crc & 0x01) !== 0) {
+          crc = (crc >>> 1) ^ poly;
+        } else {
+          crc = crc >>> 1;
+        }
+      }
+    }
+
+    return crc;
+  }
+
+  /**
+   * Verify Modbus frame CRC (adapted from response validation logic)
+   * @param frameData Complete frame data including CRC bytes
+   * @returns true if CRC is valid
+   */
+  private verifyModbusCRC(frameData: number[]): boolean {
+    if (frameData.length < 4) {
+      return false;
+    }
+    
+    // Extract CRC bytes (last 2 bytes)
+    const crcHigh = frameData[frameData.length - 1];
+    const crcLow = frameData[frameData.length - 2];
+    
+    // Calculate CRC of data without CRC bytes
+    const dataWithoutCrc = frameData.slice(0, frameData.length - 2);
+    const calculatedCrc = this.calculateModbusCRC(dataWithoutCrc);
+    
+    // Compare with received CRC
+    return (calculatedCrc & 0xFF) === crcLow && (calculatedCrc >>> 8) === crcHigh;
+  }
+
+  /**
+   * Create Modbus Read Holding Registers frame with CRC
+   * Adapted from READ_HOLDING_REGISTER callback in Lua
+   * @param address Device address
+   * @param startRegisterAddr Starting register address
+   * @param quantity Number of registers to read
+   * @returns Complete Modbus frame with CRC
+   */
+  private createReadHoldingRegistersFrame(address: number, startRegisterAddr: number, quantity: number): number[] {
+    const bytes = [
+      address,
+      0x03, // Function code for Read Holding Registers
+      (startRegisterAddr >>> 8) & 0xFF, // Start address high byte
+      startRegisterAddr & 0xFF,          // Start address low byte
+      (quantity >>> 8) & 0xFF,           // Quantity high byte
+      quantity & 0xFF                    // Quantity low byte
+    ];
+    
+    const crc = this.calculateModbusCRC(bytes);
+    bytes.push(crc & 0xFF);        // CRC low byte
+    bytes.push((crc >>> 8) & 0xFF); // CRC high byte
+    
+    return bytes;
+  }
+
+  /**
+   * Create Modbus Write Single Register frame with CRC
+   * Adapted from WRITE_SINGLE_REGISTER callback in Lua
+   * @param address Device address
+   * @param registerAddr Register address
+   * @param value Value to write
+   * @returns Complete Modbus frame with CRC
+   */
+  private createWriteSingleRegisterFrame(address: number, registerAddr: number, value: number): number[] {
+    const bytes = [
+      address,
+      0x06, // Function code for Write Single Register
+      (registerAddr >>> 8) & 0xFF, // Register address high byte
+      registerAddr & 0xFF,          // Register address low byte
+      (value >>> 8) & 0xFF,         // Value high byte
+      value & 0xFF                  // Value low byte
+    ];
+    
+    const crc = this.calculateModbusCRC(bytes);
+    bytes.push(crc & 0xFF);        // CRC low byte
+    bytes.push((crc >>> 8) & 0xFF); // CRC high byte
+    
+    return bytes;
+  }
+
+  /**
+   * Create Modbus Write Single Coil frame with CRC
+   * Adapted from WRITE_SINGLE_COIL callback in Lua
+   * @param address Device address
+   * @param coilAddr Coil address
+   * @param value Coil value (true/false)
+   * @returns Complete Modbus frame with CRC
+   */
+  private createWriteSingleCoilFrame(address: number, coilAddr: number, value: boolean): number[] {
+    const bytes = [
+      address,
+      0x05, // Function code for Write Single Coil
+      (coilAddr >>> 8) & 0xFF,      // Coil address high byte
+      coilAddr & 0xFF,              // Coil address low byte
+      value ? 0xFF : 0x00,          // Value high byte (0xFF00 for ON, 0x0000 for OFF)
+      0x00                          // Value low byte
+    ];
+    
+    const crc = this.calculateModbusCRC(bytes);
+    bytes.push(crc & 0xFF);        // CRC low byte
+    bytes.push((crc >>> 8) & 0xFF); // CRC high byte
+    
+    return bytes;
+  }
+
+  /**
+   * Validate Modbus response frame
+   * Adapted from rs485_response_queue_pair callback validation logic
+   * @param responseData Response frame data
+   * @param expectedFunctionCode Expected function code
+   * @returns Validated data or null if invalid
+   */
+  private validateModbusResponse(responseData: number[], expectedFunctionCode: number): number[] | null {
+    if (responseData.length < 5) {
+      return null;
+    }
+
+    // Check function code match
+    if (responseData[1] !== expectedFunctionCode) {
+      return null;
+    }
+
+    // Verify CRC
+    if (!this.verifyModbusCRC(responseData)) {
+      console.error('❌ CRC validation failed');
+      return null;
+    }
+
+    // For Read Holding Registers (0x03), remove address, function code, and byte count
+    if (expectedFunctionCode === 0x03) {
+      const validatedData = responseData.slice(3, responseData.length - 2); // Remove first 3 bytes and last 2 CRC bytes
+      return validatedData;
+    }
+
+    // For other function codes, return data without address, function code, and CRC
+    return responseData.slice(2, responseData.length - 2);
+  }
+
+  /**
+   * Low-level Modbus frame send/receive with CRC validation
+   * This method can be used for custom Modbus operations
+   * @param frame Complete Modbus frame with CRC
+   * @param expectedResponseLength Expected response length
+   * @param expectedFunctionCode Expected function code in response
+   * @returns Validated response data or null
+   */
+  private async sendModbusFrame(frame: number[], expectedResponseLength: number, expectedFunctionCode: number): Promise<number[] | null> {
+    // This is a placeholder for low-level frame operations
+    // In practice, you would implement actual serial communication here
+    // For now, we'll use the existing modbus-serial library methods
+    console.log(`📤 Sending Modbus frame: [${frame.join(', ')}]`);
+    console.log(`🔍 Expected response length: ${expectedResponseLength}, Function code: 0x${expectedFunctionCode.toString(16).padStart(2, '0')}`);
+    
+    // Note: The actual implementation would depend on your specific requirements
+    // This is more of a template for future low-level implementations
+    return null;
+  }
+
+  /**
    * Read flowmeter data from Sealand flowmeter
    * Based on the Lua implementation in tt_flowmeter_sealand service
    */
