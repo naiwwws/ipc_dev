@@ -22,75 +22,77 @@ interface FlowmeterData {
     volumeInventory: number;
 }
 declare class BL410ModbusReader {
-    private client;
+    private serialPort;
     private isConnected;
     private devices;
     private flowmeterRegOffset;
+    private responseBuffer;
     constructor();
     /**
-     * Initialize RS485 connection
+     * Initialize RS485 connection with raw serial port
      * @param port Serial port (e.g., '/dev/ttyS0' for BL410)
      * @param baudRate Baud rate (default: 9600)
-     * @param parity Parity setting (default: 'none')
+     * @param parity Parity setting (default: 'even')
      */
-    connect(port?: string, baudRate?: number, parity?: 'none' | 'even' | 'odd'): Promise<void>;
+    connect(port?: string, baudRate?: number, parity?: 'even' | 'none' | 'odd'): Promise<void>;
     /**
-     * Convert two 16-bit registers to a 32-bit integer (Big Endian)
-     * Mimics the Lua bit manipulation: (arg[i] << 8 | arg[i+1]) << 16 | (arg[i+2] << 8 | arg[i+3])
+     * Disconnect from RS485
      */
-    private registers32ToInt;
+    disconnect(): void;
+    /**
+     * List available serial ports
+     */
+    static listSerialPorts(): Promise<void>;
     /**
      * Convert 32-bit integer to IEEE 754 float
      * Mimics the Lua string.unpack("f", string.pack("i4", value))
      */
     private int32ToFloat;
     /**
-     * Read flowmeter data from Sealand flowmeter
-     * Based on the Lua implementation in tt_flowmeter_sealand service
+     * Calculate CRC-16 Modbus checksum
+     * Standard Modbus CRC-16 implementation
+     * @param data Buffer containing data to calculate CRC for
+     * @returns CRC-16 value
+     */
+    private calculateCRC16;
+    /**
+     * Create Modbus Read Holding Registers frame with CRC
+     * @param address Device address
+     * @param startRegisterAddr Starting register address
+     * @param quantity Number of registers to read
+     * @returns Complete Modbus frame with CRC
+     */
+    private createReadHoldingRegistersFrame;
+    /**
+     * Verify Modbus frame CRC
+     * @param frameData Complete frame data including CRC bytes
+     * @returns true if CRC is valid
+     */
+    private verifyModbusCRC;
+    /**
+     * Send raw Modbus frame and wait for response
+     */
+    private sendRawModbusFrame;
+    /**
+     * Read flowmeter data using CRC validation
      */
     readFlowmeterData(deviceAddress: number): Promise<FlowmeterData | null>;
     /**
-     * Read complete flowmeter data (all registers)
-     * Reads additional registers to get complete data set
+     * Test if a device is responsive using raw communication
+     * @param deviceAddress Device address to test
+     * @returns true if device responds, false otherwise
      */
-    readCompleteFlowmeterData(deviceAddress: number): Promise<FlowmeterData | null>;
+    testDeviceResponsive(deviceAddress: number): Promise<boolean>;
     /**
-     * Reset flowmeter accumulation
-     * Mimics the resetAccumulation command from the Lua service
+     * Scan for available devices on the bus
+     * @param addressRange Array of addresses to scan
+     * @returns Array of responsive device addresses
      */
-    resetFlowmeterAccumulation(deviceAddress: number): Promise<boolean>;
+    scanForDevices(addressRange?: number[]): Promise<number[]>;
     /**
      * Monitor multiple flowmeters continuously
      */
     monitorFlowmeters(deviceAddresses: number[], intervalMs?: number): Promise<void>;
-    /**
-     * Add a Modbus device configuration
-     */
-    addDevice(device: ModbusDevice): void;
-    /**
-     * Read holding registers from a Modbus device
-     */
-    readHoldingRegisters(deviceId: number, address: number, count: number): Promise<number[]>;
-    /**
-     * Read input registers from a Modbus device
-     */
-    readInputRegisters(deviceId: number, address: number, count: number): Promise<number[]>;
-    /**
-     * Read coils from a Modbus device
-     */
-    readCoils(deviceId: number, address: number, count: number): Promise<boolean[]>;
-    /**
-     * Write single holding register
-     */
-    writeSingleRegister(deviceId: number, address: number, value: number): Promise<void>;
-    /**
-     * List available serial ports (useful for debugging)
-     */
-    static listSerialPorts(): Promise<void>;
-    /**
-     * Disconnect from RS485
-     */
-    disconnect(): void;
 }
 export { BL410ModbusReader, ModbusDevice, FlowmeterData };
 //# sourceMappingURL=modbus.d.ts.map

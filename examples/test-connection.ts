@@ -12,7 +12,7 @@ async function testConnection() {
     console.log('🧪 Testing Modbus connection...\n');
     
     // Connect to RS485
-    await reader.connect(port, baudRate, 'none');
+    await reader.connect(port, baudRate, 'even');
     
     // Test reading a single flowmeter
     console.log(`📊 Attempting to read flowmeter at address ${deviceAddress}...\n`);
