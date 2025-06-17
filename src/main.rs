@@ -1,10 +1,9 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::io::{self, Write};
+use std::io::{self, Write, Read};
 use std::time::Duration;
 use tokio::time::sleep;
-use tokio_serial::{SerialPort, SerialPortBuilderExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serialport::SerialPort;
 
 #[derive(Debug, Clone)]
 pub struct ModbusDevice {
@@ -45,9 +44,11 @@ pub struct FlowmeterData {
 }
 
 pub struct ModbusReader {
+    // Use serialport::SerialPort instead of tokio_serial
     serial_port: Option<Box<dyn SerialPort>>,
     is_connected: bool,
-    devices: Vec<ModbusDevice>,
+    #[allow(dead_code)]
+    devices: Vec<String>,
     response_buffer: Vec<u8>,
     debug_mode: bool,
     modbus_is_busy: bool,
@@ -88,7 +89,7 @@ impl ModbusReader {
     pub async fn list_serial_ports(&self) -> Result<()> {
         println!("📡 Available Serial Ports:");
         
-        let ports = tokio_serial::available_ports()?;
+        let ports = serialport::available_ports()?;
         if ports.is_empty() {
             println!("   ⚠️  No serial ports found");
             return Ok(());
@@ -97,7 +98,7 @@ impl ModbusReader {
         for (index, port) in ports.iter().enumerate() {
             println!("   {}. {}", index + 1, port.port_name);
             match &port.port_type {
-                tokio_serial::SerialPortType::UsbPort(usb_info) => {
+                serialport::SerialPortType::UsbPort(usb_info) => {
                     if let Some(manufacturer) = &usb_info.manufacturer {
                         println!("      📱 Manufacturer: {}", manufacturer);
                     }
@@ -117,14 +118,14 @@ impl ModbusReader {
         println!("🔌 Connecting to RS485 port: {}", port);
         println!("⚙️  Configuration: {} baud, even parity, 8 data bits, 1 stop bit", baud_rate);
         
-        let serial = tokio_serial::new(port, baud_rate)
-            .data_bits(tokio_serial::DataBits::Eight)
-            .stop_bits(tokio_serial::StopBits::One)
-            .parity(tokio_serial::Parity::Even)
+        let serial = serialport::new(port, baud_rate)
+            .data_bits(serialport::DataBits::Eight)
+            .stop_bits(serialport::StopBits::One)
+            .parity(serialport::Parity::Even)
             .timeout(Duration::from_millis(1000))
             .open()?;
             
-        self.serial_port = Some(Box::new(serial));
+        self.serial_port = Some(serial);
         self.is_connected = true;
         
         println!("✅ RS485 connection established successfully");
@@ -159,7 +160,7 @@ impl ModbusReader {
 
         // Validate inputs
         if address < 1 || address > 247 {
-            return Err(anyhoo::anyhow!("Invalid device address: {}. Must be 1-247", address));
+            return Err(anyhow::anyhow!("Invalid device address: {}. Must be 1-247", address));
         }
 
         // Create frame exactly like Lua
@@ -187,7 +188,7 @@ impl ModbusReader {
 
         // Send frame
         if let Some(ref mut port) = self.serial_port {
-            port.write_all(&bytes).await?;
+            port.write_all(&bytes)?;
         }
 
         // Read response with timeout
@@ -292,7 +293,7 @@ impl ModbusReader {
 
         // Send frame
         if let Some(ref mut port) = self.serial_port {
-            port.write_all(&bytes).await?;
+            port.write_all(&bytes)?;
         }
 
         // Read response
@@ -376,7 +377,7 @@ impl ModbusReader {
 
         // Send frame
         if let Some(ref mut port) = self.serial_port {
-            port.write_all(&bytes).await?;
+            port.write_all(&bytes)?;
         }
 
         // Read response
@@ -419,20 +420,23 @@ impl ModbusReader {
         Ok(true)
     }
 
+    // Fixed read_response method for serialport crate
     async fn read_response(&mut self, expected_length: usize) -> Result<Vec<u8>> {
-        let mut buffer = [0u8; 256];
         let mut response = Vec::new();
-        let mut bytes_needed = expected_length;
+        let mut buffer = [0u8; 256];
 
         // Give some time for the response to arrive
         sleep(Duration::from_millis(50)).await;
 
-        while bytes_needed > 0 && response.len() < expected_length {
+        let timeout = Duration::from_millis(2000);
+        let start_time = std::time::Instant::now();
+
+        while response.len() < expected_length && start_time.elapsed() < timeout {
             if let Some(ref mut port) = self.serial_port {
-                match port.read(&mut buffer).await {
+                // Use blocking read (serialport crate is blocking)
+                match port.read(&mut buffer) {
                     Ok(n) if n > 0 => {
                         response.extend_from_slice(&buffer[..n]);
-                        bytes_needed = bytes_needed.saturating_sub(n);
                         
                         if self.debug_mode {
                             println!("📥 Raw data received: [{}] ({} bytes)", 
@@ -445,18 +449,20 @@ impl ModbusReader {
                         }
                     }
                     Ok(_) => {
-                        // No data available, wait a bit more
+                        // No data available, yield control to tokio
+                        tokio::task::yield_now().await;
                         sleep(Duration::from_millis(10)).await;
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                        // Timeout occurred, check if we have partial response
+                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                        // Timeout on individual read, continue waiting
                         if !response.is_empty() {
-                            sleep(Duration::from_millis(10)).await;
-                            continue;
+                            tokio::task::yield_now().await;
                         }
-                        break;
+                        sleep(Duration::from_millis(10)).await;
                     }
-                    Err(e) => return Err(anyhow::anyhow!("Read error: {}", e)),
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Read error: {}", e));
+                    }
                 }
             }
         }
@@ -533,7 +539,6 @@ impl ModbusReader {
             sleep(Duration::from_millis(500)).await;
         }
         
-        // Summary
         println!("\n📊 Scan Summary:");
         println!("   ✅ Responsive devices: [{}]", 
             responsive_devices.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "));
@@ -608,11 +613,10 @@ impl ModbusReader {
                         ((data[18] as u32) << 8) |
                         (data[19] as u32)
                     ),
-                    // Add other fields based on your data structure
-                    mass_total: 0.0,      // Parse from appropriate data bytes
-                    volume_total: 0.0,    // Parse from appropriate data bytes  
-                    mass_inventory: 0.0,  // Parse from appropriate data bytes
-                    volume_inventory: 0.0,// Parse from appropriate data bytes
+                    mass_total: 0.0,      
+                    volume_total: 0.0,    
+                    mass_inventory: 0.0,  
+                    volume_inventory: 0.0,
                 };
 
                 println!("✅ Successfully parsed flowmeter data from device {}:", device_address);
@@ -725,69 +729,88 @@ async fn main() -> Result<()> {
     reader.list_serial_ports().await?;
     println!();
     
-    // Connect to RS485
-    reader.connect("/dev/ttyS0", 9600).await?;
-    
-    // Test devices
-    let device_addresses = vec![1, 2, 3, 4, 5];
-    let responsive_devices = reader.scan_for_devices(&device_addresses).await?;
-    
-    if responsive_devices.is_empty() {
-        println!("❌ No responsive devices found. Check your connections and device addresses.");
-        reader.disconnect();
-        return Ok(());
-    }
-    
-    // Single read example
-    println!("\n📊 Single read example from responsive devices:\n");
-    for address in &responsive_devices {
-        // Example: Read a single register
-        match reader.read_holding_registers(*address, 244, 1, 2000).await? {
-            Some(data) => {
-                println!("✅ Device {}: Read {} bytes: [{}]", 
-                    address, 
-                    data.len(),
-                    data.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "));
-            }
-            None => {
-                println!("❌ Device {}: No response", address);
-            }
-        }
-    }
-    
-    // Ask for continuous monitoring
-    print!("\nStart continuous monitoring? (y/n): ");
-    io::stdout().flush()?;
-    
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    
-    if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" {
-        reader.monitor_flowmeters(&responsive_devices, Duration::from_secs(5)).await?;
+    // Connect to RS485 (adjust port for your system)
+    let port = if cfg!(target_os = "linux") {
+        "/dev/ttyUSB0"
+    } else if cfg!(target_os = "windows") {
+        "COM1"
+    } else if cfg!(target_os = "macos") {
+        "/dev/tty.usbserial-0001"  // Common macOS USB serial port
     } else {
-        // Example of other operations
-        println!("\n🔧 Testing other Modbus functions...");
-        
-        if let Some(&first_device) = responsive_devices.first() {
-            // Test write single register
-            println!("📝 Testing Write Single Register...");
-            match reader.write_single_register(first_device, 100, 0x1234, 2000).await {
-                Ok(true) => println!("✅ Write successful"),
-                Ok(false) => println!("❌ Write failed"),
-                Err(e) => println!("💥 Write error: {}", e),
+        "/dev/ttyS0"
+    };
+    
+    match reader.connect(port, 9600).await {
+        Ok(_) => {
+            // Test devices
+            let device_addresses = vec![1, 2, 3, 4, 5];
+            let responsive_devices = reader.scan_for_devices(&device_addresses).await?;
+            
+            if responsive_devices.is_empty() {
+                println!("❌ No responsive devices found. Check your connections and device addresses.");
+                reader.disconnect();
+                return Ok(());
             }
             
-            // Test write single coil  
-            println!("📝 Testing Write Single Coil...");
-            match reader.write_single_coil(first_device, 0, true, 2000).await {
-                Ok(true) => println!("✅ Coil write successful"),
-                Ok(false) => println!("❌ Coil write failed"),
-                Err(e) => println!("💥 Coil write error: {}", e),
+            // Single read example
+            println!("\n📊 Single read example from responsive devices:\n");
+            for address in &responsive_devices {
+                match reader.read_holding_registers(*address, 244, 1, 2000).await? {
+                    Some(data) => {
+                        println!("✅ Device {}: Read {} bytes: [{}]", 
+                            address, 
+                            data.len(),
+                            data.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "));
+                    }
+                    None => {
+                        println!("❌ Device {}: No response", address);
+                    }
+                }
+            }
+            
+            // Ask for continuous monitoring
+            print!("\nStart continuous monitoring? (y/n): ");
+            io::stdout().flush()?;
+            
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            
+            if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" {
+                reader.monitor_flowmeters(&responsive_devices, Duration::from_secs(5)).await?;
+            } else {
+                // Example of other operations
+                println!("\n🔧 Testing other Modbus functions...");
+                
+                if let Some(&first_device) = responsive_devices.first() {
+                    // Test write single register
+                    println!("📝 Testing Write Single Register...");
+                    match reader.write_single_register(first_device, 100, 0x1234, 2000).await {
+                        Ok(true) => println!("✅ Write successful"),
+                        Ok(false) => println!("❌ Write failed"),
+                        Err(e) => println!("💥 Write error: {}", e),
+                    }
+                    
+                    // Test write single coil  
+                    println!("📝 Testing Write Single Coil...");
+                    match reader.write_single_coil(first_device, 0, true, 2000).await {
+                        Ok(true) => println!("✅ Coil write successful"),
+                        Ok(false) => println!("❌ Coil write failed"),
+                        Err(e) => println!("💥 Coil write error: {}", e),
+                    }
+                }
+                
+                reader.disconnect();
+                println!("👋 Goodbye!");
             }
         }
-        
-        reader.disconnect();
-        println!("👋 Goodbye!");
+        Err(e) => {
+            println!("❌ Failed to connect to serial port {}: {}", port, e);
+            println!("💡 Try adjusting the port name in the code or check if the device is connected.");
+            println!("   Common ports:");
+            println!("   - Linux: /dev/ttyUSB0, /dev/ttyACM0, /dev/ttyS0");
+            println!("   - Windows: COM1, COM2, COM3, etc.");
+            println!("   - macOS: /dev/tty.usbserial-*, /dev/tty.usbmodem-*");
+        }
     }
     
     Ok(())

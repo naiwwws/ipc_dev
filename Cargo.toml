@@ -1,11 +1,11 @@
 [package]
 name = "ipc_dev_rust"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
-tokio-serial = "5.4"
+tokio = { version = "1.36.0", features = ["full"] }
+serialport = { path = "./serialport-rs" }
 bytes = "1.0"
 thiserror = "1.0"
 anyhow = "1.0"
