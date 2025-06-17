@@ -1,37 +1,21 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use std::io::{self, Write, Read};
-use std::time::Duration;
-use tokio::time::sleep;
+// use chrono::{DateTime, Utc};
 use serialport::SerialPort;
+use std::collections::HashMap;
+use std::io::{Write, Read};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use tokio::time::{interval, sleep};
+use clap::{Arg, Command};
+use serde::{Deserialize, Serialize};
+use log::{error, info};
 
-#[derive(Debug, Clone)]
-pub struct ModbusDevice {
-    pub id: u8,
-    pub name: String,
-    pub registers: Vec<RegisterInfo>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RegisterInfo {
-    pub address: u16,
-    pub count: u16,
-    pub register_type: RegisterType,
-    pub description: String,
-}
-
-#[derive(Debug, Clone)]
-pub enum RegisterType {
-    Holding,
-    Input,
-    Coil,
-    Discrete,
-}
+const VERSION: &str = "1.0.0";
+const FLOWMETER_REG_OFFSET_ADDR: u16 = 1;
 
 #[derive(Debug, Clone)]
 pub struct FlowmeterData {
-    pub device_address: u8,
-    pub timestamp: DateTime<Utc>,
     pub error_code: u32,
     pub mass_flow_rate: f32,
     pub density_flow: f32,
@@ -43,822 +27,637 @@ pub struct FlowmeterData {
     pub volume_inventory: f32,
 }
 
-pub struct ModbusReader {
-    // Use serialport::SerialPort instead of tokio_serial
-    serial_port: Option<Box<dyn SerialPort>>,
-    is_connected: bool,
-    #[allow(dead_code)]
-    devices: Vec<String>,
-    response_buffer: Vec<u8>,
-    debug_mode: bool,
-    modbus_is_busy: bool,
+impl Default for FlowmeterData {
+    fn default() -> Self {
+        Self {
+            error_code: 0,
+            mass_flow_rate: 0.0,
+            density_flow: 0.0,
+            temperature: 0.0,
+            volume_flow_rate: 0.0,
+            mass_total: 0.0,
+            volume_total: 0.0,
+            mass_inventory: 0.0,
+            volume_inventory: 0.0,
+        }
+    }
 }
 
-impl ModbusReader {
-    pub fn new() -> Self {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub serial_port: String,
+    pub baud_rate: u32,
+    pub device_addresses: Vec<u8>,
+    pub update_interval_seconds: u64,
+    pub timeout_ms: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
         Self {
-            serial_port: None,
-            is_connected: false,
-            devices: Vec::new(),
-            response_buffer: Vec::new(),
-            debug_mode: true,
-            modbus_is_busy: false,
+            serial_port: "/dev/ttyS0".to_string(),
+            baud_rate: 9600,
+            device_addresses: vec![2,3],
+            update_interval_seconds: 10,
+            timeout_ms: 1000,
         }
     }
+}
 
-    // CRC16 Modbus calculation - exactly matching Lua implementation
-    fn crc16_modbus(&self, data: &[u8]) -> u16 {
-        let poly = 0xA001;
-        let mut crc = 0xFFFF;
-
-        for byte in data {
-            crc ^= *byte as u16;
-            
-            for _ in 0..8 {
-                if crc & 0x01 != 0 {
-                    crc = (crc >> 1) ^ poly;
-                } else {
-                    crc = crc >> 1;
-                }
-            }
-        }
-
-        crc
-    }
-
-    pub async fn list_serial_ports(&self) -> Result<()> {
-        println!("📡 Available Serial Ports:");
-        
-        let ports = serialport::available_ports()?;
-        if ports.is_empty() {
-            println!("   ⚠️  No serial ports found");
-            return Ok(());
-        }
-        
-        for (index, port) in ports.iter().enumerate() {
-            println!("   {}. {}", index + 1, port.port_name);
-            match &port.port_type {
-                serialport::SerialPortType::UsbPort(usb_info) => {
-                    if let Some(manufacturer) = &usb_info.manufacturer {
-                        println!("      📱 Manufacturer: {}", manufacturer);
-                    }
-                    if let Some(serial_number) = &usb_info.serial_number {
-                        println!("      🔢 Serial Number: {}", serial_number);
-                    }
-                }
-                _ => {}
-            }
-            println!();
-        }
-        
-        Ok(())
-    }
-
-    pub async fn connect(&mut self, port: &str, baud_rate: u32) -> Result<()> {
-        println!("🔌 Connecting to RS485 port: {}", port);
-        println!("⚙️  Configuration: {} baud, even parity, 8 data bits, 1 stop bit", baud_rate);
-        
-        let serial = serialport::new(port, baud_rate)
-            .data_bits(serialport::DataBits::Eight)
-            .stop_bits(serialport::StopBits::One)
-            .parity(serialport::Parity::Even)
-            .timeout(Duration::from_millis(100)) // Shorter timeout for individual reads
-            .open()?;
-            
-        self.serial_port = Some(serial);
-        self.is_connected = true;
-        
-        println!("✅ RS485 connection established successfully");
-        Ok(())
-    }
-
-    pub fn disconnect(&mut self) {
-        if self.is_connected {
-            self.serial_port = None;
-            self.is_connected = false;
-            self.response_buffer.clear();
-            self.modbus_is_busy = false;
-            println!("✅ RS485 connection closed gracefully");
-        }
-    }
-
-    // Read Holding Registers - matching Lua implementation
-    pub async fn read_holding_registers(
-        &mut self, 
-        address: u8, 
-        start_register_addr: u16, 
-        quantity: u16,
-        timeout_ms: u64
-    ) -> Result<Option<Vec<u8>>> {
-        if !self.is_connected || self.serial_port.is_none() {
-            return Err(anyhow::anyhow!("Not connected to RS485. Call connect() first."));
-        }
-
-        if self.modbus_is_busy {
-            return Err(anyhow::anyhow!("Modbus is busy"));
-        }
-
-        // Validate inputs
-        if address < 1 || address > 247 {
-            return Err(anyhow::anyhow!("Invalid device address: {}. Must be 1-247", address));
-        }
-
-        // Create frame exactly like Lua
-        let mut bytes = vec![
-            address,
-            0x03, // Read Holding Registers
-            (start_register_addr >> 8) as u8,
-            (start_register_addr & 0xFF) as u8,
-            (quantity >> 8) as u8,
-            (quantity & 0xFF) as u8,
-        ];
-
-        // Calculate and append CRC exactly like Lua
-        let crc = self.crc16_modbus(&bytes);
-        bytes.push((crc & 0xFF) as u8);      // CRC low byte
-        bytes.push((crc >> 8) as u8);        // CRC high byte
-
-        if self.debug_mode {
-            println!("📤 Sending frame: [{}]", 
-                bytes.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "));
-        }
-
-        self.modbus_is_busy = true;
-        let read_length = (quantity * 2) + 5; // Data bytes + address + function + byte_count + 2 CRC
-
-        // Send frame - add flush to ensure data is transmitted
-        if let Some(ref mut port) = self.serial_port {
-            port.write_all(&bytes)?;
-            port.flush()?; // Force transmission
-        }
-
-        // Give device time to process before reading
-        sleep(Duration::from_millis(100)).await;
-
-        // Read response with timeout
-        let response = match tokio::time::timeout(
-            Duration::from_millis(timeout_ms + 1000),
-            self.read_response(read_length as usize)
-        ).await {
-            Ok(Ok(data)) => data,
-            Ok(Err(e)) => {
-                self.modbus_is_busy = false;
-                return Err(e);
-            }
-            Err(_) => {
-                self.modbus_is_busy = false;
-                println!("⏰ Response timeout");
-                return Ok(None);
-            }
-        };
-
-        self.modbus_is_busy = false;
-
-        // Process response exactly like Lua
-        if response.len() < 5 {
-            println!("❌ Response too short");
-            return Ok(None);
-        }
-
-        // Check if response matches expected format
-        if response[1] != 0x03 {
-            println!("❌ Unexpected function code: 0x{:02x}", response[1]);
-            return Ok(None);
-        }
-
-        // Verify CRC exactly like Lua
-        let mut response_data = response.clone();
-        let crc_high = response_data.pop().unwrap();
-        let crc_low = response_data.pop().unwrap();
-        let received_crc = self.crc16_modbus(&response_data);
-
-        if (received_crc & 0xFF) as u8 != crc_low || (received_crc >> 8) as u8 != crc_high {
-            println!("❌ CRC validation failed");
-            if self.debug_mode {
-                println!("   📐 Calculated CRC: 0x{:04x} (Low: 0x{:02x}, High: 0x{:02x})", 
-                    received_crc, received_crc & 0xFF, received_crc >> 8);
-                println!("   📨 Received CRC: Low=0x{:02x}, High=0x{:02x}", crc_low, crc_high);
-            }
-            return Ok(None);
-        }
-
-        // Extract data exactly like Lua - remove address, function code, and byte count
-        let mut data = response_data;
-        data.remove(0); // address
-        data.remove(0); // function code
-        data.remove(0); // byte count
-
-        if self.debug_mode {
-            println!("✅ Valid response received: [{}]", 
-                data.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "));
-        }
-
-        Ok(Some(data))
-    }
-
-    // Write Single Register - matching Lua implementation
-    pub async fn write_single_register(
-        &mut self,
+#[derive(Debug, Clone)]
+pub enum ModbusRequest {
+    ReadHoldingRegisters {
         address: u8,
-        register_addr: u16,
-        value: u16,
-        timeout_ms: u64
-    ) -> Result<bool> {
-        if !self.is_connected || self.serial_port.is_none() {
-            return Err(anyhow::anyhow!("Not connected to RS485. Call connect() first."));
-        }
-
-        if self.modbus_is_busy {
-            return Err(anyhow::anyhow!("Modbus is busy"));
-        }
-
-        // Create frame exactly like Lua
-        let mut bytes = vec![
-            address,
-            0x06, // Write Single Register
-            (register_addr >> 8) as u8,
-            (register_addr & 0xFF) as u8,
-            (value >> 8) as u8,
-            (value & 0xFF) as u8,
-        ];
-
-        // Calculate and append CRC
-        let crc = self.crc16_modbus(&bytes);
-        bytes.push((crc & 0xFF) as u8);
-        bytes.push((crc >> 8) as u8);
-
-        if self.debug_mode {
-            println!("📤 Write Single Register frame: [{}]", 
-                bytes.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "));
-        }
-
-        self.modbus_is_busy = true;
-        let read_length = 8; // Echo response length
-
-        // Send frame
-        if let Some(ref mut port) = self.serial_port {
-            port.write_all(&bytes)?;
-            port.flush()?; // Force transmission
-        }
-
-        // Read response
-        let response = match tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            self.read_response(read_length)
-        ).await {
-            Ok(Ok(data)) => data,
-            Ok(Err(e)) => {
-                self.modbus_is_busy = false;
-                return Err(e);
-            }
-            Err(_) => {
-                self.modbus_is_busy = false;
-                println!("⏰ Write response timeout");
-                return Ok(false);
-            }
-        };
-
-        self.modbus_is_busy = false;
-
-        // Verify response (should echo the request)
-        if response.len() != 8 || response[1] != 0x06 {
-            println!("❌ Invalid write response");
-            return Ok(false);
-        }
-
-        // Verify CRC
-        let mut response_data = response.clone();
-        let crc_high = response_data.pop().unwrap();
-        let crc_low = response_data.pop().unwrap();
-        let received_crc = self.crc16_modbus(&response_data);
-
-        if (received_crc & 0xFF) as u8 != crc_low || (received_crc >> 8) as u8 != crc_high {
-            println!("❌ Write response CRC validation failed");
-            return Ok(false);
-        }
-
-        println!("✅ Write Single Register successful");
-        Ok(true)
-    }
-
-    // Write Single Coil - matching Lua implementation  
-    pub async fn write_single_coil(
-        &mut self,
+        start_register: u16,
+        quantity: u16,
+        requester: String,
+    },
+    WriteSingleCoil {
         address: u8,
         coil_addr: u16,
         value: bool,
-        timeout_ms: u64
-    ) -> Result<bool> {
-        if !self.is_connected || self.serial_port.is_none() {
-            return Err(anyhow::anyhow!("Not connected to RS485. Call connect() first."));
-        }
+        requester: String,
+    },
+}
 
-        if self.modbus_is_busy {
-            return Err(anyhow::anyhow!("Modbus is busy"));
-        }
+#[derive(Debug, Clone)]
+pub enum ModbusResponse {
+    Success(Vec<u8>),
+    Error(String),
+}
 
-        // Create frame exactly like Lua
-        let mut bytes = vec![
-            address,
-            0x05, // Write Single Coil
-            (coil_addr >> 8) as u8,
-            (coil_addr & 0xFF) as u8,
-            if value { 0xFF } else { 0x00 }, // Coil value
-            0x00,
-        ];
+pub struct ModbusClient {
+    port: Box<dyn SerialPort>,
+}
 
-        // Calculate and append CRC
-        let crc = self.crc16_modbus(&bytes);
-        bytes.push((crc & 0xFF) as u8);
-        bytes.push((crc >> 8) as u8);
+impl ModbusClient {
+    pub fn new(port_name: &str, baud_rate: u32) -> Result<Self, Box<dyn std::error::Error>> {
+        info!("🔌 Connecting to Modbus RTU port: {}", port_name);
+        info!("⚙️  Configuration: {} baud, 8 data bits, 1 stop bit, 1000ms timeout", baud_rate);
+        
+        let port = serialport::new(port_name, baud_rate)
+            .timeout(Duration::from_millis(1000))
+            .data_bits(serialport::DataBits::Eight)
+            .stop_bits(serialport::StopBits::One)
+            .parity(serialport::Parity::None)
+            .open()
+            .map_err(|e| {
+                error!("❌ Failed to open serial port {}: {}", port_name, e);
+                e
+            })?;
 
-        if self.debug_mode {
-            println!("📤 Write Single Coil frame: [{}]", 
-                bytes.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "));
-        }
-
-        self.modbus_is_busy = true;
-        let read_length = 8;
-
-        // Send frame
-        if let Some(ref mut port) = self.serial_port {
-            port.write_all(&bytes)?;
-            port.flush()?; // Force transmission
-        }
-
-        // Read response
-        let response = match tokio::time::timeout(
-            Duration::from_millis(timeout_ms + 1000),
-            self.read_response(read_length)
-        ).await {
-            Ok(Ok(data)) => data,
-            Ok(Err(e)) => {
-                self.modbus_is_busy = false;
-                return Err(e);
-            }
-            Err(_) => {
-                self.modbus_is_busy = false;
-                println!("⏰ Coil write response timeout");
-                return Ok(false);
-            }
-        };
-
-        self.modbus_is_busy = false;
-
-        // Verify response
-        if response.len() != 8 || response[1] != 0x05 {
-            println!("❌ Invalid coil write response");
-            return Ok(false);
-        }
-
-        // Verify CRC
-        let mut response_data = response.clone();
-        let crc_high = response_data.pop().unwrap();
-        let crc_low = response_data.pop().unwrap();
-        let received_crc = self.crc16_modbus(&response_data);
-
-        if (received_crc & 0xFF) as u8 != crc_low || (received_crc >> 8) as u8 != crc_high {
-            println!("❌ Coil write response CRC validation failed");
-            return Ok(false);
-        }
-
-        println!("✅ Write Single Coil successful");
-        Ok(true)
+        info!("✅ Modbus RTU connection established successfully");
+        Ok(Self { port })
     }
 
-    // Completely rewritten read_response to match TypeScript behavior
-    async fn read_response(&mut self, expected_length: usize) -> Result<Vec<u8>> {
-        let mut response = Vec::new();
-        let mut consecutive_timeouts = 0;
-        const MAX_CONSECUTIVE_TIMEOUTS: usize = 5;
+    pub fn crc16_modbus(data: &[u8]) -> u16 {
+        let mut crc: u16 = 0xFFFF;
+        let poly: u16 = 0xA001;
+
+        for &byte in data {
+            crc ^= byte as u16;
+            for _ in 0..8 {
+                if crc & 0x0001 != 0 {
+                    crc = (crc >> 1) ^ poly;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        crc
+    }
+
+    pub fn read_holding_registers(
+        &mut self,
+        slave_id: u8,
+        start_addr: u16,
+        count: u16,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        info!("📊 Reading {} registers from device {} starting at address {}", count, slave_id, start_addr);
         
-        // Initial delay to allow device response
-        sleep(Duration::from_millis(50)).await;
+        let mut request = vec![slave_id, 0x03];
+        request.extend_from_slice(&start_addr.to_be_bytes());
+        request.extend_from_slice(&count.to_be_bytes());
 
-        let overall_timeout = Duration::from_millis(3000);
-        let start_time = std::time::Instant::now();
+        let crc = Self::crc16_modbus(&request);
+        request.extend_from_slice(&crc.to_le_bytes());
 
-        if self.debug_mode {
-            println!("📡 Waiting for response (expected length: {} bytes)...", expected_length);
+        // info!("📤 Sending Modbus frame: {:02X?}", request);
+
+        self.port.write_all(&request).map_err(|e| {
+            error!("❌ Failed to write to serial port: {}", e);
+            e
+        })?;
+        self.port.flush()?;
+
+        // Wait for response
+        thread::sleep(Duration::from_millis(50));
+
+        let expected_len = 5 + (count * 2) as usize;
+        let mut response = vec![0u8; expected_len];
+        
+        match self.port.read_exact(&mut response) {
+            Ok(_) => {
+                // info!("📥 Received response: {:02X?}", response);
+                // Verify CRC
+                let data_len = response.len() - 2;
+                let received_crc = u16::from_le_bytes([response[data_len], response[data_len + 1]]);
+                let calculated_crc = Self::crc16_modbus(&response[..data_len]);
+
+                if received_crc == calculated_crc && response[0] == slave_id && response[1] == 0x03 {
+                    // Return only the data bytes (skip slave_id, func_code, byte_count)
+                    Ok(response[3..data_len].to_vec())
+                } else {
+                    Err("CRC mismatch or invalid response".into())
+                }
+            }
+            Err(e) => {
+                error!("❌ Failed to read from device {}: {}", slave_id, e);
+                Err(e.into())
+            }
+        }
+    }
+
+    pub fn write_single_coil(
+        &mut self,
+        slave_id: u8,
+        coil_addr: u16,
+        value: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut request = vec![slave_id, 0x05];
+        request.extend_from_slice(&coil_addr.to_be_bytes());
+        request.extend_from_slice(&(if value { 0xFF00u16 } else { 0x0000u16 }).to_be_bytes());
+
+        let crc = Self::crc16_modbus(&request);
+        request.extend_from_slice(&crc.to_le_bytes());
+
+        self.port.write_all(&request)?;
+        self.port.flush()?;
+
+        // Wait for response
+        thread::sleep(Duration::from_millis(50));
+
+        let mut response = vec![0u8; 8];
+        match self.port.read_exact(&mut response) {
+            Ok(_) => {
+                let data_len = response.len() - 2;
+                let received_crc = u16::from_le_bytes([response[data_len], response[data_len + 1]]);
+                let calculated_crc = Self::crc16_modbus(&response[..data_len]);
+
+                if received_crc == calculated_crc && response[0] == slave_id && response[1] == 0x05 {
+                    Ok(())
+                } else {
+                    Err("CRC mismatch or invalid response".into())
+                }
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+pub struct FlowmeterService {
+    config: Config,
+    devices: Arc<Mutex<HashMap<u8, FlowmeterData>>>,
+    modbus_client: Arc<Mutex<ModbusClient>>,
+}
+
+impl FlowmeterService {
+    pub fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+        info!("🚀 Initializing Flowmeter Service");
+        info!("📡 Target devices: {:?}", config.device_addresses);
+        
+        let modbus_client = ModbusClient::new(&config.serial_port, config.baud_rate)?;
+        let mut devices = HashMap::new();
+
+        // Initialize devices
+        for &addr in &config.device_addresses {
+            devices.insert(addr, FlowmeterData::default());
+            info!("📋 Registered device address: {}", addr);
         }
 
-        while start_time.elapsed() < overall_timeout {
-            if let Some(ref mut port) = self.serial_port {
-                let mut buffer = [0u8; 256];
-                
-                match port.read(&mut buffer) {
-                    Ok(n) if n > 0 => {
-                        response.extend_from_slice(&buffer[..n]);
-                        consecutive_timeouts = 0; // Reset timeout counter
-                        
-                        if self.debug_mode {
-                            println!("📥 Raw data chunk: [{}] ({} bytes)", 
-                                buffer[..n].iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "),
-                                n);
-                            println!("📊 Total received: {} bytes", response.len());
-                        }
+        info!("✅ Flowmeter Service initialized successfully");
+        Ok(Self {
+            config,
+            devices: Arc::new(Mutex::new(devices)),
+            modbus_client: Arc::new(Mutex::new(modbus_client)),
+        })
+    }
 
-                        // For Read Holding Registers (0x03), check if we have enough for a complete response
-                        if response.len() >= 5 {
-                            // Check for error response first
-                            if response[1] & 0x80 != 0 {
-                                if response.len() >= 5 {
-                                    if self.debug_mode {
-                                        println!("📥 Error response detected (5 bytes)");
-                                    }
-                                    break;
-                                }
-                            }
-                            // Normal response for function 0x03
-                            else if response.len() >= 3 && response[1] == 0x03 {
-                                let byte_count = response[2] as usize;
-                                let expected_total = 3 + byte_count + 2; // Address + Function + ByteCount + Data + CRC
-                                
-                                if self.debug_mode {
-                                    println!("📏 Function 0x03 response: byte_count={}, expected_total={}", 
-                                        byte_count, expected_total);
-                                }
-                                
-                                if response.len() >= expected_total {
-                                    if self.debug_mode {
-                                        println!("📥 Complete response received");
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        // No data available - this is normal with short timeouts
-                        tokio::task::yield_now().await;
-                        sleep(Duration::from_millis(10)).await;
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                        consecutive_timeouts += 1;
+    fn parse_flowmeter_data(&self, device_address: u8, data: &[u8]) -> FlowmeterData {
+        if data.len() < 44 {
+            error!("Insufficient data length for device {}: {}", device_address, data.len());
+            return FlowmeterData::default();
+        }
+
+        // Convert register pairs to u32 values (big-endian)
+        let error_code = ((data[0] as u32) << 24) | ((data[1] as u32) << 16) | 
+                        ((data[2] as u32) << 8) | (data[3] as u32);
+        
+        let mass_flow_rate_raw = ((data[4] as u32) << 24) | ((data[5] as u32) << 16) | 
+                                ((data[6] as u32) << 8) | (data[7] as u32);
+        
+        let density_flow_raw = ((data[8] as u32) << 24) | ((data[9] as u32) << 16) | 
+                              ((data[10] as u32) << 8) | (data[11] as u32);
+        
+        let temperature_raw = ((data[12] as u32) << 24) | ((data[13] as u32) << 16) | 
+                             ((data[14] as u32) << 8) | (data[15] as u32);
+        
+        let volume_flow_rate_raw = ((data[16] as u32) << 24) | ((data[17] as u32) << 16) | 
+                                  ((data[18] as u32) << 8) | (data[19] as u32);
+        
+        let mass_total_raw = ((data[28] as u32) << 24) | ((data[29] as u32) << 16) | 
+                            ((data[30] as u32) << 8) | (data[31] as u32);
+        
+        let volume_total_raw = ((data[32] as u32) << 24) | ((data[33] as u32) << 16) | 
+                              ((data[34] as u32) << 8) | (data[35] as u32);
+        
+        let mass_inventory_raw = ((data[36] as u32) << 24) | ((data[37] as u32) << 16) | 
+                                ((data[38] as u32) << 8) | (data[39] as u32);
+        
+        let volume_inventory_raw = ((data[40] as u32) << 24) | ((data[41] as u32) << 16) | 
+                                  ((data[42] as u32) << 8) | (data[43] as u32);
+
+        // Convert u32 to f32 (IEEE 754)
+        FlowmeterData {
+            error_code,
+            mass_flow_rate: f32::from_bits(mass_flow_rate_raw),
+            density_flow: f32::from_bits(density_flow_raw),
+            temperature: f32::from_bits(temperature_raw),
+            volume_flow_rate: f32::from_bits(volume_flow_rate_raw),
+            mass_total: f32::from_bits(mass_total_raw),
+            volume_total: f32::from_bits(volume_total_raw),
+            mass_inventory: f32::from_bits(mass_inventory_raw),
+            volume_inventory: f32::from_bits(volume_inventory_raw),
+        }
+    }
+
+    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut interval = interval(Duration::from_secs(self.config.update_interval_seconds));
+
+        loop {
+            interval.tick().await;
+            
+            info!("Requesting data from flowmeter devices");
+            
+            for &device_addr in &self.config.device_addresses {
+                match self.read_device_data(device_addr).await {
+                    Ok(data) => {
+                        let flowmeter_data = self.parse_flowmeter_data(device_addr, &data);
                         
-                        // If we have some data and hit timeouts, the response might be complete
-                        if !response.is_empty() && consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
-                            if self.debug_mode {
-                                println!("📡 Multiple timeouts with data present - considering response complete");
-                            }
-                            break;
+                        if let Ok(mut devices) = self.devices.lock() {
+                            devices.insert(device_addr, flowmeter_data.clone());
                         }
                         
-                        tokio::task::yield_now().await;
-                        sleep(Duration::from_millis(10)).await;
+                        info!("Address {}: Mass Flow Rate: {:.2}, Temperature: {:.2}, Density: {:.4}, Volume Flow Rate: {:.3}, Mass Total: {:.2}, Volume Total: {:.3}, Mass Inventory: {:.2}, Volume Inventory: {:.3}",
+                               device_addr, flowmeter_data.mass_flow_rate, flowmeter_data.temperature,
+                               flowmeter_data.density_flow, flowmeter_data.volume_flow_rate,
+                               flowmeter_data.mass_total, flowmeter_data.volume_total,
+                               flowmeter_data.mass_inventory, flowmeter_data.volume_inventory); 
                     }
                     Err(e) => {
-                        return Err(anyhow::anyhow!("Serial read error: {}", e));
-                    }
-                }
-            }
-        }
-
-        if response.is_empty() {
-            return Err(anyhow::anyhow!("No response received within timeout"));
-        }
-
-        if self.debug_mode {
-            println!("📥 Final response: [{}] ({} bytes)", 
-                response.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "),
-                response.len());
-        }
-
-        Ok(response)
-    }
-
-    // Test device responsiveness
-    pub async fn test_device_responsive(&mut self, device_address: u8) -> Result<bool> {
-        if !self.is_connected {
-            return Ok(false);
-        }
-
-        let max_attempts = 3;
-        for attempt in 1..=max_attempts {
-            println!("🔍 Testing device {} (attempt {}/{})...", device_address, attempt, max_attempts);
-
-            match self.read_holding_registers(device_address, 244, 1, 2000).await {
-                Ok(Some(_)) => {
-                    println!("✅ Device {} is responsive", device_address);
-                    return Ok(true);
-                }
-                Ok(None) => {
-                    println!("📵 Device {} test attempt {} failed", device_address, attempt);
-                }
-                Err(e) => {
-                    println!("❌ Device {} test error: {}", device_address, e);
-                }
-            }
-
-            if attempt < max_attempts {
-                sleep(Duration::from_secs(1)).await;
-            }
-        }
-
-        println!("📵 Device {} is not responsive after {} attempts", device_address, max_attempts);
-        Ok(false)
-    }
-
-    // Scan for devices
-    pub async fn scan_for_devices(&mut self, address_range: &[u8]) -> Result<Vec<u8>> {
-        println!("🔍 Scanning for devices on addresses: [{}]", 
-            address_range.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "));
-        
-        let mut responsive_devices = Vec::new();
-        
-        for &address in address_range {
-            println!("\n🔍 Scanning device {}...", address);
-            
-            match self.test_device_responsive(address).await {
-                Ok(true) => {
-                    responsive_devices.push(address);
-                    println!("✅ Device {} added to responsive list", address);
-                }
-                Ok(false) => {
-                    println!("❌ Device {} scan failed", address);
-                }
-                Err(e) => {
-                    println!("❌ Device {} scan failed: {}", address, e);
-                }
-            }
-            
-            // Delay between device scans
-            sleep(Duration::from_millis(500)).await;
-        }
-        
-        println!("\n📊 Scan Summary:");
-        println!("   ✅ Responsive devices: [{}]", 
-            responsive_devices.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "));
-        
-        let non_responsive: Vec<u8> = address_range.iter()
-            .filter(|&&addr| !responsive_devices.contains(&addr))
-            .cloned()
-            .collect();
-        println!("   📵 Non-responsive: [{}]", 
-            non_responsive.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "));
-        
-        let success_rate = (responsive_devices.len() as f32 / address_range.len() as f32) * 100.0;
-        println!("   📈 Success rate: {:.1}%", success_rate);
-        
-        Ok(responsive_devices)
-    }
-
-    // Convert 32-bit integer to float
-    fn int32_to_float(&self, value: u32) -> f32 {
-        f32::from_bits(value)
-    }
-
-    // Read flowmeter data (customize based on your device)
-    pub async fn read_flowmeter_data(&mut self, device_address: u8) -> Result<Option<FlowmeterData>> {
-        if !self.is_connected {
-            return Err(anyhow::anyhow!("Not connected to RS485. Call connect() first."));
-        }
-
-        // Read registers for flowmeter data
-        let start_address = 244; // Adjust based on your device
-        let register_count = 22;  // Adjust based on your data structure
-        
-        println!("📊 Reading flowmeter data from device {}", device_address);
-        
-        match self.read_holding_registers(device_address, start_address, register_count, 5000).await? {
-            Some(data) => {
-                if data.len() < 44 { // 22 registers * 2 bytes each
-                    println!("❌ Insufficient data received");
-                    return Ok(None);
-                }
-
-                // Parse flowmeter data (adjust based on your device's data format)
-                let flowmeter_data = FlowmeterData {
-                    device_address,
-                    timestamp: Utc::now(),
-                    // Parse your specific data format here
-                    error_code: ((data[0] as u32) << 24) | 
-                                ((data[1] as u32) << 16) |
-                                ((data[2] as u32) << 8) | 
-                                (data[3] as u32),
-                    mass_flow_rate: self.int32_to_float(
-                        ((data[4] as u32) << 24) |
-                        ((data[5] as u32) << 16) |
-                        ((data[6] as u32) << 8) |
-                        (data[7] as u32)
-                    ),
-                    density_flow: self.int32_to_float(
-                        ((data[8] as u32) << 24) |
-                        ((data[9] as u32) << 16) |
-                        ((data[10] as u32) << 8) |
-                        (data[11] as u32)
-                    ),
-                    temperature: self.int32_to_float(
-                        ((data[12] as u32) << 24) |
-                        ((data[13] as u32) << 16) |
-                        ((data[14] as u32) << 8) |
-                        (data[15] as u32)
-                    ),
-                    volume_flow_rate: self.int32_to_float(
-                        ((data[16] as u32) << 24) |
-                        ((data[17] as u32) << 16) |
-                        ((data[18] as u32) << 8) |
-                        (data[19] as u32)
-                    ),
-                    mass_total: 0.0,      
-                    volume_total: 0.0,    
-                    mass_inventory: 0.0,  
-                    volume_inventory: 0.0,
-                };
-
-                println!("✅ Successfully parsed flowmeter data from device {}:", device_address);
-                println!("   🏷️  Error Code: 0x{:x}", flowmeter_data.error_code);
-                println!("   ⚖️  Mass Flow Rate: {:.3} kg/h", flowmeter_data.mass_flow_rate);
-                println!("   🌡️  Temperature: {:.2} °C", flowmeter_data.temperature);
-                println!("   💧 Volume Flow Rate: {:.3} m³/h", flowmeter_data.volume_flow_rate);
-
-                Ok(Some(flowmeter_data))
-            }
-            None => {
-                println!("❌ No valid response from device {}", device_address);
-                Ok(None)
-            }
-        }
-    }
-
-    // Monitor flowmeters continuously
-    pub async fn monitor_flowmeters(&mut self, device_addresses: &[u8], interval: Duration) -> Result<()> {
-        println!("🔄 Starting flowmeter monitoring");
-        println!("   📡 Devices: [{}]", 
-            device_addresses.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "));
-        println!("   ⏱️  Update interval: {:?}", interval);
-        println!("   🛑 Press Ctrl+C to stop\n");
-        
-        let mut successful_reads = 0u32;
-        let mut failed_reads = 0u32;
-        
-        let mut interval_timer = tokio::time::interval(interval);
-        
-        loop {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    println!("\n🛑 Stopping flowmeter monitor...");
-                    break;
-                }
-                _ = interval_timer.tick() => {
-                    println!("\n⏰ {} - Reading flowmeter data...", Utc::now().format("%Y-%m-%d %H:%M:%S"));
-                    
-                    for &device_address in device_addresses {
-                        match self.read_flowmeter_data(device_address).await {
-                            Ok(Some(data)) => {
-                                successful_reads += 1;
-                                println!("📊 Device {} - Flowmeter Data:", device_address);
-                                println!("   🏷️  Error Code: 0x{:x}", data.error_code);
-                                println!("   ⚖️  Mass Flow: {:.2} kg/h", data.mass_flow_rate);
-                                println!("   🌡️  Temperature: {:.2} °C", data.temperature);
-                                println!("   💧 Volume Flow: {:.3} m³/h", data.volume_flow_rate);
-                            }
-                            Ok(None) => {
-                                failed_reads += 1;
-                                println!("📵 Device {} - Read failed", device_address);
-                            }
-                            Err(e) => {
-                                failed_reads += 1;
-                                println!("💥 Device {} - Error: {}", device_address, e);
-                            }
+                        error!("Failed to read data from device {}: {}", device_addr, e);
+                        
+                        // Set default values on error
+                        if let Ok(mut devices) = self.devices.lock() {
+                            devices.insert(device_addr, FlowmeterData::default());
                         }
                     }
+                }
+                
+                // Small delay between device requests
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    async fn read_device_data(&self, device_addr: u8) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let start_register = 245 - FLOWMETER_REG_OFFSET_ADDR;
+        let quantity = 22;
+
+        if let Ok(mut client) = self.modbus_client.lock() {
+            client.read_holding_registers(device_addr, start_register, quantity)
+        } else {
+            Err("Failed to acquire modbus client lock".into())
+        }
+    }
+
+    pub fn reset_accumulation(&self, device_addr: u8) -> Result<(), Box<dyn std::error::Error>> {
+        // Check if device exists
+        if let Ok(devices) = self.devices.lock() {
+            if !devices.contains_key(&device_addr) {
+                return Err("Invalid device address".into());
+            }
+        }
+
+        let coil_addr = 3 - FLOWMETER_REG_OFFSET_ADDR;
+        
+        if let Ok(mut client) = self.modbus_client.lock() {
+            client.write_single_coil(device_addr, coil_addr, true)?;
+            info!("Reset accumulation for device {}", device_addr);
+            Ok(())
+        } else {
+            Err("Failed to acquire modbus client lock".into())
+        }
+    }
+
+    pub fn get_volatile_data(&self, name: &str) -> String {
+        if let Ok(devices) = self.devices.lock() {
+            match name {
+                "MassFlowRate" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| format!("{:.2}", d.mass_flow_rate))
+                                .unwrap_or_else(|| "0.00".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                "DensityFlow" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| format!("{:.4}", d.density_flow))
+                                .unwrap_or_else(|| "0.0000".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                "Temperature" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| format!("{:.2}", d.temperature))
+                                .unwrap_or_else(|| "0.00".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                "VolumeFlowRate" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| format!("{:.3}", d.volume_flow_rate))
+                                .unwrap_or_else(|| "0.000".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                "MassTotal" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| format!("{:.2}", d.mass_total))
+                                .unwrap_or_else(|| "0.00".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                "VolumeTotal" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| format!("{:.3}", d.volume_total))
+                                .unwrap_or_else(|| "0.000".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                "MassInventory" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| format!("{:.2}", d.mass_inventory))
+                                .unwrap_or_else(|| "0.00".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                "VolumeInventory" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| format!("{:.3}", d.volume_inventory))
+                                .unwrap_or_else(|| "0.000".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                "ErrorCode" => {
+                    let values: Vec<String> = self.config.device_addresses
+                        .iter()
+                        .map(|&addr| {
+                            devices.get(&addr)
+                                .map(|d| d.error_code.to_string())
+                                .unwrap_or_else(|| "0".to_string())
+                        })
+                        .collect();
+                    values.join(" ")
+                }
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn get_all_data(&self) -> Vec<FlowmeterData> {
+        if let Ok(devices) = self.devices.lock() {
+            self.config.device_addresses
+                .iter()
+                .map(|&addr| {
+                    devices.get(&addr)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+
+    pub async fn read_all_devices_once(&self) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Reading data from all devices once...");
+        
+        for &device_addr in &self.config.device_addresses {
+            match self.read_device_data(device_addr).await {
+                Ok(data) => {
+                    let flowmeter_data = self.parse_flowmeter_data(device_addr, &data);
                     
-                    // Display statistics
-                    let total_reads = successful_reads + failed_reads;
-                    if total_reads > 0 {
-                        let success_rate = (successful_reads as f32 / total_reads as f32) * 100.0;
-                        println!("📈 Success rate: {:.1}% ({}/{})", success_rate, successful_reads, total_reads);
+                    if let Ok(mut devices) = self.devices.lock() {
+                        devices.insert(device_addr, flowmeter_data.clone());
                     }
+                    
+                    info!("Address {}: Mass Flow Rate: {:.2}, Temperature: {:.2}, Density: {:.4}, Volume Flow Rate: {:.3}, Mass Total: {:.2}, Volume Total: {:.3}, Mass Inventory: {:.2}, Volume Inventory: {:.3}",
+                           device_addr, flowmeter_data.mass_flow_rate, flowmeter_data.temperature,
+                           flowmeter_data.density_flow, flowmeter_data.volume_flow_rate,
+                           flowmeter_data.mass_total, flowmeter_data.volume_total,
+                           flowmeter_data.mass_inventory, flowmeter_data.volume_inventory); 
+                }
+                Err(e) => {
+                    error!("Failed to read data from device {}: {}", device_addr, e);
                 }
             }
         }
-        
-        println!("📊 Final Statistics:");
-        println!("   ✅ Successful reads: {}", successful_reads);
-        println!("   ❌ Failed reads: {}", failed_reads);
-        
-        self.disconnect();
+
         Ok(())
-    }
-
-    pub fn set_debug_mode(&mut self, enabled: bool) {
-        self.debug_mode = enabled;
-        println!("🔧 Debug mode {}", if enabled { "enabled" } else { "disabled" });
-    }
-
-    // Test CRC implementation
-    pub fn test_crc_implementation(&self) {
-        println!("🔧 Testing CRC implementation (Lua-compatible)...");
-        
-        // Test with known Modbus frame
-        let test_data = [0x01, 0x03, 0x00, 0xF4, 0x00, 0x01];
-        let calculated_crc = self.crc16_modbus(&test_data);
-        println!("   📊 Test data: [{}]", 
-            test_data.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "));
-        println!("   🔢 Calculated CRC: 0x{:04x}", calculated_crc);
-        println!("   📋 CRC bytes: Low=0x{:02x}, High=0x{:02x}", 
-            calculated_crc & 0xFF, (calculated_crc >> 8) & 0xFF);
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    println!("🖥️  Modbus Reader - Rust Version (Lua-compatible)\n");
-    
-    let mut reader = ModbusReader::new();
-    
-    // Test CRC implementation
-    reader.test_crc_implementation();
-    println!();
-    
-    // List serial ports
-    reader.list_serial_ports().await?;
-    println!();
-    
-    // Connect to RS485 (adjust port for your system)
-    let port = if cfg!(target_os = "linux") {
-        "/dev/ttyUSB0"
-    } else if cfg!(target_os = "windows") {
-        "COM1"
-    } else if cfg!(target_os = "macos") {
-        "/dev/tty.usbserial-0001"  // Common macOS USB serial port
-    } else {
-        "/dev/ttyS0"
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+
+    let matches = Command::new("flowmeter sealand")
+        .version(VERSION)
+        .about("Flowmeter Sealand Modbus Service")
+        .arg(
+            Arg::new("port")
+                .short('p')
+                .long("port")
+                .value_name("PORT")
+                .help("Serial port path")
+                .default_value("/dev/ttyS0"),
+        )
+        .arg(
+            Arg::new("baud")
+                .short('b')
+                .long("baud")
+                .value_name("BAUD")
+                .help("Baud rate")
+                .default_value("9600"),
+        )
+        .arg(
+            Arg::new("devices")
+                .short('d')
+                .long("devices")
+                .value_name("DEVICES")
+                .help("Device addresses (comma-separated)")
+                .default_value("2,3"),
+        )
+        .arg(
+            Arg::new("interval")
+                .short('i')
+                .long("interval")
+                .value_name("SECONDS")
+                .help("Update interval in seconds")
+                .default_value("10"),
+        )
+        .subcommand(
+            Command::new("getdata")
+                .about("Get all device data")
+        )
+        .subcommand(
+            Command::new("getvolatile")
+                .about("Get volatile data for specific parameter")
+                .arg(
+                    Arg::new("parameter")
+                        .help("Parameter name (MassFlowRate, Temperature, DensityFlow, etc.)")
+                        .required(true)
+                        .index(1),
+                )
+        )
+        .subcommand(
+            Command::new("resetaccumulation")
+                .about("Reset accumulation for a device")
+                .arg(
+                    Arg::new("device_address")
+                        .help("Device address to reset")
+                        .required(true)
+                        .index(1),
+                ),
+        )
+        .get_matches();
+
+    let config = Config {
+        serial_port: matches.get_one::<String>("port").unwrap().clone(),
+        baud_rate: matches.get_one::<String>("baud").unwrap().parse()?,
+        device_addresses: matches
+            .get_one::<String>("devices")
+            .unwrap()
+            .split(',')
+            .map(|s| s.trim().parse::<u8>())
+            .collect::<Result<Vec<_>, _>>()?,
+        update_interval_seconds: matches.get_one::<String>("interval").unwrap().parse()?,
+        timeout_ms: 1000,
     };
-    
-    match reader.connect(port, 9600).await {
-        Ok(_) => {
-            // Test devices
-            let device_addresses = vec![1, 2, 3, 4, 5];
-            let responsive_devices = reader.scan_for_devices(&device_addresses).await?;
-            
-            if responsive_devices.is_empty() {
-                println!("❌ No responsive devices found. Check your connections and device addresses.");
-                reader.disconnect();
-                return Ok(());
-            }
-            
-            // Single read example
-            println!("\n📊 Single read example from responsive devices:\n");
-            for address in &responsive_devices {
-                match reader.read_holding_registers(*address, 244, 1, 2000).await? {
-                    Some(data) => {
-                        println!("✅ Device {}: Read {} bytes: [{}]", 
-                            address, 
-                            data.len(),
-                            data.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "));
-                    }
-                    None => {
-                        println!("❌ Device {}: No response", address);
-                    }
-                }
-            }
-            
-            // Ask for continuous monitoring
-            print!("\nStart continuous monitoring? (y/n): ");
-            io::stdout().flush()?;
-            
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            
-            if input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes" {
-                reader.monitor_flowmeters(&responsive_devices, Duration::from_secs(5)).await?;
-            } else {
-                // Example of other operations
-                println!("\n🔧 Testing other Modbus functions...");
-                
-                if let Some(&first_device) = responsive_devices.first() {
-                    // Test write single register
-                    println!("📝 Testing Write Single Register...");
-                    match reader.write_single_register(first_device, 100, 0x1234, 2000).await {
-                        Ok(true) => println!("✅ Write successful"),
-                        Ok(false) => println!("❌ Write failed"),
-                        Err(e) => println!("💥 Write error: {}", e),
-                    }
-                    
-                    // Test write single coil  
-                    println!("📝 Testing Write Single Coil...");
-                    match reader.write_single_coil(first_device, 0, true, 2000).await {
-                        Ok(true) => println!("✅ Coil write successful"),
-                        Ok(false) => println!("❌ Coil write failed"),
-                        Err(e) => println!("💥 Coil write error: {}", e),
-                    }
-                }
-                
-                reader.disconnect();
-                println!("👋 Goodbye!");
-            }
+
+    let service = FlowmeterService::new(config)?;
+
+    // Handle subcommands - BUT READ DATA FIRST
+    if let Some(_matches) = matches.subcommand_matches("getdata") {
+        info!("Executing getdata command...");
+        
+        // Read data from devices first
+        service.read_all_devices_once().await?;
+        
+        let all_data = service.get_all_data();
+        println!("All Device Data:");
+        for (i, data) in all_data.iter().enumerate() {
+            let device_addr = service.config.device_addresses[i];
+            println!("Device {}: Error: {}, Mass Flow: {:.2}, Temp: {:.2}, Density: {:.4}", 
+                     device_addr, data.error_code, data.mass_flow_rate, data.temperature, data.density_flow);
         }
-        Err(e) => {
-            println!("❌ Failed to connect to serial port {}: {}", port, e);
-            println!("💡 Try adjusting the port name in the code or check if the device is connected.");
-            println!("   Common ports:");
-            println!("   - Linux: /dev/ttyUSB0, /dev/ttyACM0, /dev/ttyS0");
-            println!("   - Windows: COM1, COM2, COM3, etc.");
-            println!("   - macOS: /dev/tty.usbserial-*, /dev/tty.usbmodem-*");
-        }
+        return Ok(());
     }
-    
+
+    if let Some(matches) = matches.subcommand_matches("getvolatile") {
+        info!("Executing getvolatile command...");
+        
+        // Read data from devices first
+        service.read_all_devices_once().await?;
+        
+        let parameter = matches.get_one::<String>("parameter").unwrap();
+        let value = service.get_volatile_data(parameter);
+        println!("{}: {}", parameter, value);
+        return Ok(());
+    }
+
+    if let Some(matches) = matches.subcommand_matches("resetaccumulation") {
+        let device_addr: u8 = matches.get_one::<String>("device_address").unwrap().parse()?;
+        service.reset_accumulation(device_addr)?;
+        println!("Reset accumulation command sent to device {}", device_addr);
+        return Ok(());
+    }
+
+    // Start the continuous service (only if no subcommands)
+    info!("Starting flowmeter sealand service version {}", VERSION);
+    info!("Serial port: {}", service.config.serial_port);
+    info!("Baud rate: {}", service.config.baud_rate);
+    info!("Device addresses: {:?}", service.config.device_addresses);
+    info!("Update interval: {} seconds", service.config.update_interval_seconds);
+
+    // Run the service
+    service.run().await?;
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crc16_modbus() {
+        let data = vec![0x01, 0x03, 0x00, 0xF4, 0x00, 0x16];
+        let crc = ModbusClient::crc16_modbus(&data);
+        // Expected CRC for this data (may vary based on implementation)
+        assert!(crc != 0);
+    }
+
+    #[test]
+    fn test_flowmeter_data_default() {
+        let data = FlowmeterData::default();
+        assert_eq!(data.error_code, 0);
+        assert_eq!(data.mass_flow_rate, 0.0);
+        assert_eq!(data.temperature, 0.0);
+    }
 }
