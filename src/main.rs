@@ -122,7 +122,7 @@ impl ModbusReader {
             .data_bits(serialport::DataBits::Eight)
             .stop_bits(serialport::StopBits::One)
             .parity(serialport::Parity::Even)
-            .timeout(Duration::from_millis(1000))
+            .timeout(Duration::from_millis(100)) // Shorter timeout for individual reads
             .open()?;
             
         self.serial_port = Some(serial);
@@ -186,14 +186,18 @@ impl ModbusReader {
         self.modbus_is_busy = true;
         let read_length = (quantity * 2) + 5; // Data bytes + address + function + byte_count + 2 CRC
 
-        // Send frame
+        // Send frame - add flush to ensure data is transmitted
         if let Some(ref mut port) = self.serial_port {
             port.write_all(&bytes)?;
+            port.flush()?; // Force transmission
         }
+
+        // Give device time to process before reading
+        sleep(Duration::from_millis(100)).await;
 
         // Read response with timeout
         let response = match tokio::time::timeout(
-            Duration::from_millis(timeout_ms), 
+            Duration::from_millis(timeout_ms + 1000),
             self.read_response(read_length as usize)
         ).await {
             Ok(Ok(data)) => data,
@@ -294,6 +298,7 @@ impl ModbusReader {
         // Send frame
         if let Some(ref mut port) = self.serial_port {
             port.write_all(&bytes)?;
+            port.flush()?; // Force transmission
         }
 
         // Read response
@@ -378,11 +383,12 @@ impl ModbusReader {
         // Send frame
         if let Some(ref mut port) = self.serial_port {
             port.write_all(&bytes)?;
+            port.flush()?; // Force transmission
         }
 
         // Read response
         let response = match tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
+            Duration::from_millis(timeout_ms + 1000),
             self.read_response(read_length)
         ).await {
             Ok(Ok(data)) => data,
@@ -420,59 +426,100 @@ impl ModbusReader {
         Ok(true)
     }
 
-    // Fixed read_response method for serialport crate
+    // Completely rewritten read_response to match TypeScript behavior
     async fn read_response(&mut self, expected_length: usize) -> Result<Vec<u8>> {
         let mut response = Vec::new();
-        let mut buffer = [0u8; 256];
-
-        // Give some time for the response to arrive
+        let mut consecutive_timeouts = 0;
+        const MAX_CONSECUTIVE_TIMEOUTS: usize = 5;
+        
+        // Initial delay to allow device response
         sleep(Duration::from_millis(50)).await;
 
-        let timeout = Duration::from_millis(2000);
+        let overall_timeout = Duration::from_millis(3000);
         let start_time = std::time::Instant::now();
 
-        while response.len() < expected_length && start_time.elapsed() < timeout {
+        if self.debug_mode {
+            println!("📡 Waiting for response (expected length: {} bytes)...", expected_length);
+        }
+
+        while start_time.elapsed() < overall_timeout {
             if let Some(ref mut port) = self.serial_port {
-                // Use blocking read (serialport crate is blocking)
+                let mut buffer = [0u8; 256];
+                
                 match port.read(&mut buffer) {
                     Ok(n) if n > 0 => {
                         response.extend_from_slice(&buffer[..n]);
+                        consecutive_timeouts = 0; // Reset timeout counter
                         
                         if self.debug_mode {
-                            println!("📥 Raw data received: [{}] ({} bytes)", 
+                            println!("📥 Raw data chunk: [{}] ({} bytes)", 
                                 buffer[..n].iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "),
                                 n);
+                            println!("📊 Total received: {} bytes", response.len());
                         }
 
-                        if response.len() >= expected_length {
-                            break;
+                        // For Read Holding Registers (0x03), check if we have enough for a complete response
+                        if response.len() >= 5 {
+                            // Check for error response first
+                            if response[1] & 0x80 != 0 {
+                                if response.len() >= 5 {
+                                    if self.debug_mode {
+                                        println!("📥 Error response detected (5 bytes)");
+                                    }
+                                    break;
+                                }
+                            }
+                            // Normal response for function 0x03
+                            else if response.len() >= 3 && response[1] == 0x03 {
+                                let byte_count = response[2] as usize;
+                                let expected_total = 3 + byte_count + 2; // Address + Function + ByteCount + Data + CRC
+                                
+                                if self.debug_mode {
+                                    println!("📏 Function 0x03 response: byte_count={}, expected_total={}", 
+                                        byte_count, expected_total);
+                                }
+                                
+                                if response.len() >= expected_total {
+                                    if self.debug_mode {
+                                        println!("📥 Complete response received");
+                                    }
+                                    break;
+                                }
+                            }
                         }
                     }
                     Ok(_) => {
-                        // No data available, yield control to tokio
+                        // No data available - this is normal with short timeouts
                         tokio::task::yield_now().await;
                         sleep(Duration::from_millis(10)).await;
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                        // Timeout on individual read, continue waiting
-                        if !response.is_empty() {
-                            tokio::task::yield_now().await;
+                        consecutive_timeouts += 1;
+                        
+                        // If we have some data and hit timeouts, the response might be complete
+                        if !response.is_empty() && consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS {
+                            if self.debug_mode {
+                                println!("📡 Multiple timeouts with data present - considering response complete");
+                            }
+                            break;
                         }
+                        
+                        tokio::task::yield_now().await;
                         sleep(Duration::from_millis(10)).await;
                     }
                     Err(e) => {
-                        return Err(anyhow::anyhow!("Read error: {}", e));
+                        return Err(anyhow::anyhow!("Serial read error: {}", e));
                     }
                 }
             }
         }
 
         if response.is_empty() {
-            return Err(anyhow::anyhow!("No response received"));
+            return Err(anyhow::anyhow!("No response received within timeout"));
         }
 
         if self.debug_mode {
-            println!("📥 Complete response: [{}] ({} bytes)", 
+            println!("📥 Final response: [{}] ({} bytes)", 
                 response.iter().map(|b| format!("0x{:02x}", b)).collect::<Vec<_>>().join(", "),
                 response.len());
         }
