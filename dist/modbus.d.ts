@@ -27,72 +27,64 @@ declare class BL410ModbusReader {
     private devices;
     private flowmeterRegOffset;
     private responseBuffer;
+    private debugMode;
     constructor();
     /**
-     * Initialize RS485 connection with raw serial port
-     * @param port Serial port (e.g., '/dev/ttyS0' for BL410)
-     * @param baudRate Baud rate (default: 9600)
-     * @param parity Parity setting (default: 'even')
+     * Initialize RS485 connection with enhanced error handling
      */
     connect(port?: string, baudRate?: number, parity?: 'even' | 'none' | 'odd'): Promise<void>;
     /**
-     * Disconnect from RS485
+     * Disconnect from RS485 with cleanup
      */
     disconnect(): void;
     /**
-     * List available serial ports
+     * Enhanced serial port listing
      */
     static listSerialPorts(): Promise<void>;
     /**
-     * Convert 32-bit integer to IEEE 754 float
-     * Mimics the Lua string.unpack("f", string.pack("i4", value))
+     * Convert 32-bit integer to IEEE 754 float (Lua compatible)
      */
     private int32ToFloat;
     /**
-     * Calculate CRC-16 Modbus checksum
-     * Standard Modbus CRC-16 implementation
-     * @param data Buffer containing data to calculate CRC for
-     * @returns CRC-16 value
+     * Enhanced CRC-16 Modbus calculation with validation
      */
     private calculateCRC16;
     /**
-     * Create Modbus Read Holding Registers frame with CRC
-     * @param address Device address
-     * @param startRegisterAddr Starting register address
-     * @param quantity Number of registers to read
-     * @returns Complete Modbus frame with CRC
+     * Create Modbus Read Holding Registers frame with CONSISTENT CRC byte order
      */
     private createReadHoldingRegistersFrame;
     /**
-     * Verify Modbus frame CRC
-     * @param frameData Complete frame data including CRC bytes
-     * @returns true if CRC is valid
+     * Enhanced CRC verification with CONSISTENT byte order handling
      */
     private verifyModbusCRC;
     /**
-     * Send raw Modbus frame and wait for response
+     * Enhanced raw Modbus frame sender with dynamic response detection
      */
     private sendRawModbusFrame;
     /**
-     * Read flowmeter data using CRC validation
-     */
-    readFlowmeterData(deviceAddress: number): Promise<FlowmeterData | null>;
-    /**
-     * Test if a device is responsive using raw communication
-     * @param deviceAddress Device address to test
-     * @returns true if device responds, false otherwise
+     * Enhanced device responsiveness test with multiple attempts
      */
     testDeviceResponsive(deviceAddress: number): Promise<boolean>;
     /**
-     * Scan for available devices on the bus
-     * @param addressRange Array of addresses to scan
-     * @returns Array of responsive device addresses
+     * Enhanced flowmeter data reading with comprehensive error handling
+     */
+    readFlowmeterData(deviceAddress: number): Promise<FlowmeterData | null>;
+    /**
+     * Enhanced device scanning with robust error handling
      */
     scanForDevices(addressRange?: number[]): Promise<number[]>;
     /**
-     * Monitor multiple flowmeters continuously
+     * Enhanced continuous monitoring with error recovery
      */
     monitorFlowmeters(deviceAddresses: number[], intervalMs?: number): Promise<void>;
+    /**
+     * Debug helper for testing CRC implementation
+     */
+    testCRCImplementation(): void;
+    /**
+     * Set debug mode
+     */
+    setDebugMode(enabled: boolean): void;
 }
 export { BL410ModbusReader, ModbusDevice, FlowmeterData };
 //# sourceMappingURL=modbus.d.ts.map

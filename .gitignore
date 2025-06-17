@@ -1,3 +1,4 @@
 examples/dump/main.lua
 node_modules/
 package-lock.json
+dist/*
