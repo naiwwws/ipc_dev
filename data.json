@@ -1,0 +1,111 @@
+{
+  "devices": [
+    {
+      "data": {
+        "density_flow": 1.0045251846313477,
+        "device_address": 2,
+        "error_code": 0,
+        "mass_flow_rate": 0.0,
+        "mass_inventory": 24953.8203125,
+        "mass_total": 24953.8203125,
+        "temperature": 29.44000244140625,
+        "timestamp": "2025-06-17T14:33:17.100647148Z",
+        "volume_flow_rate": 0.0,
+        "volume_inventory": 27557.193359375,
+        "volume_total": 27557.193359375
+      },
+      "device_address": 2
+    },
+    {
+      "data": {
+        "density_flow": 1.004168152809143,
+        "device_address": 3,
+        "error_code": 0,
+        "mass_flow_rate": 0.0,
+        "mass_inventory": 26063.787109375,
+        "mass_total": 26063.759765625,
+        "temperature": 29.57000732421875,
+        "timestamp": "2025-06-17T14:33:17.268007568Z",
+        "volume_flow_rate": 0.0,
+        "volume_inventory": 71111.3671875,
+        "volume_total": 27727.26953125
+      },
+      "device_address": 3
+    }
+  ],
+  "timestamp": "2025-06-17T14:33:17.369538886+00:00"
+}
+{
+  "devices": [
+    {
+      "data": {
+        "density_flow": 1.0045251846313477,
+        "device_address": 2,
+        "error_code": 0,
+        "mass_flow_rate": 0.0,
+        "mass_inventory": 24953.8203125,
+        "mass_total": 24953.8203125,
+        "temperature": 29.44000244140625,
+        "timestamp": "2025-06-17T14:33:29.780815839Z",
+        "volume_flow_rate": 0.0,
+        "volume_inventory": 27557.193359375,
+        "volume_total": 27557.193359375
+      },
+      "device_address": 2
+    },
+    {
+      "data": {
+        "density_flow": 1.0042475461959839,
+        "device_address": 3,
+        "error_code": 0,
+        "mass_flow_rate": 0.0,
+        "mass_inventory": 26063.787109375,
+        "mass_total": 26063.759765625,
+        "temperature": 29.550003051757812,
+        "timestamp": "2025-06-17T14:33:29.948111800Z",
+        "volume_flow_rate": 0.0,
+        "volume_inventory": 71111.3671875,
+        "volume_total": 27727.26953125
+      },
+      "device_address": 3
+    }
+  ],
+  "timestamp": "2025-06-17T14:33:30.049440113+00:00"
+}
+{
+  "devices": [
+    {
+      "data": {
+        "density_flow": 1.004546046257019,
+        "device_address": 2,
+        "error_code": 0,
+        "mass_flow_rate": 0.0,
+        "mass_inventory": 24953.8203125,
+        "mass_total": 24953.8203125,
+        "temperature": 29.44000244140625,
+        "timestamp": "2025-06-17T14:34:42.565660311Z",
+        "volume_flow_rate": 0.0,
+        "volume_inventory": 27557.193359375,
+        "volume_total": 27557.193359375
+      },
+      "device_address": 2
+    },
+    {
+      "data": {
+        "density_flow": 1.0042269229888916,
+        "device_address": 3,
+        "error_code": 0,
+        "mass_flow_rate": 0.0,
+        "mass_inventory": 26063.787109375,
+        "mass_total": 26063.759765625,
+        "temperature": 29.550003051757812,
+        "timestamp": "2025-06-17T14:34:42.732115379Z",
+        "volume_flow_rate": 0.0,
+        "volume_inventory": 71111.3671875,
+        "volume_total": 27727.26953125
+      },
+      "device_address": 3
+    }
+  ],
+  "timestamp": "2025-06-17T14:34:42.833887035+00:00"
+}
