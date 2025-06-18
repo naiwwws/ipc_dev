@@ -17,7 +17,7 @@ pub use config::Config;
 pub use services::DataService;
 pub use devices::{Device, DeviceData, FlowmeterDevice, FlowmeterData};
 pub use modbus::ModbusClient;
-pub use output::{DataFormatter, DataSender, ConsoleFormatter, JsonFormatter, CsvFormatter};
+pub use output::{DataFormatter, DataSender, ConsoleFormatter, JsonFormatter, CsvFormatter, HexFormatter}; // Add HexFormatter
 pub use utils::error::ModbusError;
 
 pub const VERSION: &str = "1.0.0";

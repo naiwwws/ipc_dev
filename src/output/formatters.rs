@@ -2,7 +2,7 @@ use chrono::Utc;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::devices::DeviceData;
+use crate::devices::{DeviceData, FlowmeterData};
 
 pub trait DataFormatter: Send + Sync {
     fn format_single_device(&self, addr: u8, data: &dyn DeviceData) -> String;
@@ -141,5 +141,69 @@ impl DataFormatter for CsvFormatter {
     
     fn format_header(&self) -> String {
         "Device,Parameter,Value,Timestamp\n".to_string()
+    }
+}
+
+pub struct HexFormatter;
+
+impl DataFormatter for HexFormatter {
+    fn format_single_device(&self, addr: u8, data: &dyn DeviceData) -> String {
+        // Try to get FlowmeterData and create hex representation
+        if let Some(flowmeter_data) = data.as_any().downcast_ref::<FlowmeterData>() {
+            format!(
+                "🔍 Device {} Hex Data:\n\
+                ErrorCode: 0x{:08X}\n\
+                MassFlowRate: 0x{:08X} ({:.2} kg/h)\n\
+                DensityFlow: 0x{:08X} ({:.4} kg/L)\n\
+                Temperature: 0x{:08X} ({:.1}°C)\n\
+                VolumeFlowRate: 0x{:08X} ({:.3} L/h)\n\
+                MassTotal: 0x{:08X} ({:.2} kg)\n\
+                VolumeTotal: 0x{:08X} ({:.3} L)\n\
+                MassInventory: 0x{:08X} ({:.2} kg)\n\
+                VolumeInventory: 0x{:08X} ({:.3} L)\n\
+                Timestamp: {}\n",
+                addr,
+                flowmeter_data.error_code,
+                flowmeter_data.mass_flow_rate.to_bits(), flowmeter_data.mass_flow_rate,
+                flowmeter_data.density_flow.to_bits(), flowmeter_data.density_flow,
+                flowmeter_data.temperature.to_bits(), flowmeter_data.temperature,
+                flowmeter_data.volume_flow_rate.to_bits(), flowmeter_data.volume_flow_rate,
+                flowmeter_data.mass_total.to_bits(), flowmeter_data.mass_total,
+                flowmeter_data.volume_total.to_bits(), flowmeter_data.volume_total,
+                flowmeter_data.mass_inventory.to_bits(), flowmeter_data.mass_inventory,
+                flowmeter_data.volume_inventory.to_bits(), flowmeter_data.volume_inventory,
+                flowmeter_data.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
+            )
+        } else {
+            format!("🔍 Device {} - Hex format not available for this device type\n", addr)
+        }
+    }
+    
+    fn format_multiple_devices(&self, devices_data: &[(u8, &dyn DeviceData)]) -> String {
+        let mut output = String::from("🔍 All Devices Hex Data:\n");
+        output.push_str(&"═".repeat(80));
+        output.push('\n');
+        
+        for (addr, data) in devices_data {
+            output.push_str(&self.format_single_device(*addr, *data));
+            output.push_str(&"─".repeat(80));
+            output.push('\n');
+        }
+        
+        output
+    }
+    
+    fn format_parameter_data(&self, parameter: &str, values: &HashMap<u8, String>) -> String {
+        let mut output = format!("🔍 Parameter '{}' Hex Values:\n", parameter);
+        
+        for (addr, value) in values {
+            output.push_str(&format!("Device {}: {}\n", addr, value));
+        }
+        
+        output
+    }
+    
+    fn format_header(&self) -> String {
+        format!("🔍 Hex Data Output - {}\n", Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"))
     }
 }

@@ -25,4 +25,7 @@ pub enum ModbusError {
     
     #[error("Timeout occurred")]
     Timeout,
+
+    #[error("Device not found: {0}")]
+    DeviceNotFound(String),
 }

@@ -65,8 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::new("format")
                 .long("format")
                 .value_name("FORMAT")
-                .help("Output format: console, json, csv")
-                .value_parser(["console", "json", "csv"])
+                .help("Output format: console, json, csv, hex")  // Add hex here
+                .value_parser(["console", "json", "csv", "hex"])  // Add hex here
                 .default_value("console"),
         )
         .arg(
@@ -117,6 +117,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .index(1),
                 ),
         )
+        .subcommand(
+            Command::new("getrawdata")
+                .about("Get raw device data for debugging")
+                .arg(
+                    Arg::new("device")
+                        .long("device")
+                        .short('d')
+                        .value_name("ADDRESS")
+                        .help("Specific device address (optional)")
+                )
+                .arg(
+                    Arg::new("format")
+                        .long("format")
+                        .short('f')
+                        .value_name("FORMAT")
+                        .help("Output format: debug, hex, json, binary")
+                        .value_parser(["debug", "hex", "json", "binary"])
+                        .default_value("debug")
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .short('o')
+                        .value_name("FILE")
+                        .help("Output file path")
+                )
+        )
+        .subcommand(
+            Command::new("compare-raw")
+                .about("Compare raw vs processed data")
+                .arg(
+                    Arg::new("device")
+                        .help("Device address")
+                        .required(true)
+                        .index(1)
+                )
+        )
         .get_matches();
 
     let config = Config::from_matches(&matches)?;
@@ -141,6 +178,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "csv" => {
                     info!("🎨 Using CSV formatter");
                     service.set_formatter(Box::new(crate::output::CsvFormatter));
+                }
+                "hex" => {  // Add hex format support
+                    info!("🔍 Using Hex formatter");
+                    service.set_formatter(Box::new(crate::output::HexFormatter));
                 }
                 _ => {} // Keep default console formatter
             }

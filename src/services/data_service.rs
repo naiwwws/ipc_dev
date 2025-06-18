@@ -8,6 +8,8 @@ use crate::devices::{Device, DeviceData, FlowmeterDevice};
 use crate::modbus::ModbusClient;
 use crate::output::{DataFormatter, DataSender, ConsoleFormatter, ConsoleSender};
 use crate::utils::error::ModbusError;
+use crate::devices::flowmeter::{FlowmeterRawPayload};
+use crate::output::raw_sender::{RawDataSender, RawDataFormat};
 
 pub struct DataService {
     config: Config,
@@ -273,5 +275,101 @@ impl DataService {
         } else {
             Err(ModbusError::InvalidDevice(device_addr))
         }
+    }
+
+    pub async fn read_raw_device_data(&self, device_addr: u8, format: &str, output_file: Option<&String>) -> Result<(), ModbusError> {
+        for device in &self.devices {
+            if device.address() == device_addr {
+                if let Some(flowmeter) = device.as_any().downcast_ref::<FlowmeterDevice>() {
+                    let raw_payload = flowmeter.read_raw_payload(self.modbus_client.as_ref()).await?;
+                    
+                    // Print to console
+                    println!("🔍 Raw Data for Device {}:", device_addr);
+                    println!("{}", raw_payload.debug_info());
+                    println!("📊 Payload Size: {} bytes", raw_payload.payload_size);
+                    println!("🌐 Online Decoder: {}", raw_payload.get_decoder_url());
+                    
+                    // Save to file if requested
+                    if let Some(file_path) = output_file {
+                        let raw_format = match format {
+                            "hex" => RawDataFormat::Hex,
+                            "binary" => RawDataFormat::Binary,
+                            "json" => RawDataFormat::Json,
+                            _ => RawDataFormat::Debug,
+                        };
+                        
+                        let sender = RawDataSender::new(file_path, raw_format, true);
+                        sender.send_raw_payload(&raw_payload).await?;
+                        
+                        info!("💾 Raw data saved to: {}", file_path);
+                    }
+                    
+                    return Ok(());
+                }
+            }
+        }
+        
+        Err(ModbusError::DeviceNotFound(format!("Device {} not found or not a flowmeter", device_addr)))
+    }
+
+    pub async fn read_all_raw_device_data(&self, format: &str, output_file: Option<&String>) -> Result<(), ModbusError> {
+        let mut total_size = 0;
+        
+        for device in &self.devices {
+            if let Some(flowmeter) = device.as_any().downcast_ref::<FlowmeterDevice>() {
+                let raw_payload = flowmeter.read_raw_payload(self.modbus_client.as_ref()).await?;
+                total_size += raw_payload.payload_size;
+                
+                println!("🔍 Raw Data for Device {}:", device.address());
+                println!("{}", raw_payload.debug_info());
+                println!("────────────────────────────────────────");
+                
+                // Save to file if requested
+                if let Some(file_path) = output_file {
+                    let device_file = format!("{}_{}", file_path, device.address());
+                    let raw_format = match format {
+                        "hex" => RawDataFormat::Hex,
+                        "binary" => RawDataFormat::Binary,
+                        "json" => RawDataFormat::Json,
+                        _ => RawDataFormat::Debug,
+                    };
+                    
+                    let sender = RawDataSender::new(&device_file, raw_format, true);
+                    sender.send_raw_payload(&raw_payload).await?;
+                }
+            }
+        }
+        
+        println!("📊 Total Raw Data Size: {} bytes across {} devices", total_size, self.devices.len());
+        Ok(())
+    }
+
+    pub async fn compare_raw_vs_processed(&self, device_addr: u8) -> Result<(), ModbusError> {
+        for device in &self.devices {
+            if device.address() == device_addr {
+                if let Some(flowmeter) = device.as_any().downcast_ref::<FlowmeterDevice>() {
+                    let (processed_data, raw_payload) = flowmeter.read_data_with_raw(self.modbus_client.as_ref()).await?;
+                    
+                    println!("🔄 Raw vs Processed Data Comparison for Device {}:", device_addr);
+                    println!("\n📊 Raw Data:");
+                    println!("{}", raw_payload.debug_info());
+                    
+                    println!("\n📈 Processed Data:");
+                    for (param, value) in processed_data.get_all_parameters() {
+                        println!("  {}: {}", param, value);
+                    }
+                    
+                    println!("\n🔬 Engineering Units from Raw:");
+                    let engineering_from_raw = raw_payload.to_engineering_units();
+                    for (param, value) in engineering_from_raw.get_all_parameters() {
+                        println!("  {}: {}", param, value);
+                    }
+                    
+                    return Ok(());
+                }
+            }
+        }
+        
+        Err(ModbusError::DeviceNotFound(format!("Device {} not found", device_addr)))
     }
 }
