@@ -108,7 +108,6 @@ async fn handle_show_command(
         let status = if device.enabled { "✅" } else { "❌" };
         println!("🏷️  Name: {}", device.name);
         println!("🆔 Device UUID: {}", device.uuid);
-        println!("🏭 Device ID: {}", device.device_id);
         println!("📡 Address: {} | Type: {} | Status: {}", 
                  device.address, device.device_type, status);
         println!("📍 Location: {}", device.location);

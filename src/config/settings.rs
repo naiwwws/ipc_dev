@@ -42,7 +42,6 @@ pub struct Config {
 pub struct DeviceConfig {
     pub uuid: String,                   // Device UUID
     pub address: u8,                    // Modbus address
-    pub device_id: String,              // Human-readable device identifier
     pub device_type: String,            // Device type
     pub name: String,                   // Device name
     pub location: String,               // Physical location
@@ -105,6 +104,37 @@ pub struct DatabaseOutputConfig {
     pub connection_string: String,
     pub table_name: String,
     pub batch_insert: bool,
+    // NEW: SQLite specific settings
+    pub sqlite_config: SqliteConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqliteConfig {
+    pub database_path: String,
+    pub max_connections: u32,
+    pub connection_timeout_seconds: u64,
+    pub batch_size: usize,
+    pub auto_vacuum: bool,
+    pub wal_mode: bool,          // Write-Ahead Logging for better performance
+    pub sync_mode: String,       // NORMAL, FULL, OFF
+    pub cache_size_kb: i64,      // SQLite cache size
+    pub busy_timeout_ms: u32,    // Timeout for busy database
+}
+
+impl Default for SqliteConfig {
+    fn default() -> Self {
+        Self {
+            database_path: "./data/sensor_data.db".to_string(),
+            max_connections: 5,
+            connection_timeout_seconds: 30,
+            batch_size: 100,
+            auto_vacuum: true,
+            wal_mode: true,
+            sync_mode: "NORMAL".to_string(),
+            cache_size_kb: 2048, // 2MB cache
+            busy_timeout_ms: 5000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,7 +174,6 @@ impl Default for Config {
         default_devices.push(DeviceConfig {
             uuid: Uuid::new_v4().to_string(),
             address: 2,
-            device_id: "TT_SB_001".to_string(),
             device_type: "Flowmeter".to_string(),
             name: "Inlet Flowmeter".to_string(),
             location: "Building A - Line 1".to_string(),
@@ -170,7 +199,6 @@ impl Default for Config {
         default_devices.push(DeviceConfig {
             uuid: Uuid::new_v4().to_string(),
             address: 3,
-            device_id: "TT_SB_002".to_string(),
             device_type: "Flowmeter".to_string(),
             name: "Outlet Flowmeter".to_string(),
             location: "Building A - Line 2".to_string(),
@@ -233,7 +261,13 @@ impl Default for Config {
                 }),
                 http_output: None,
                 mqtt_output: None,
-                database_output: None,
+                database_output: Some(DatabaseOutputConfig {
+                    enabled: true,
+                    connection_string: "sqlite:./data/sensor_data.db".to_string(),
+                    table_name: "device_readings".to_string(),
+                    batch_insert: true,
+                    sqlite_config: SqliteConfig::default(),
+                }),
             },
             
             // Site information
@@ -279,7 +313,6 @@ impl Config {
                     config.devices.push(DeviceConfig {
                         uuid: Uuid::new_v4().to_string(),
                         address: addr,
-                        device_id: format!("DEV_{:03}", addr),
                         device_type: "flowmeter".to_string(),
                         name: format!("Device {}", addr),
                         location: "Unknown".to_string(),
@@ -370,11 +403,6 @@ impl Config {
         self.devices.iter().find(|d| d.uuid == uuid)
     }
 
-    // Get device by device_id
-    pub fn get_device_by_device_id(&self, device_id: &str) -> Option<&DeviceConfig> {
-        self.devices.iter().find(|d| d.device_id == device_id)
-    }
-
     // Get device by name
     pub fn get_device_by_name(&self, name: &str) -> Option<&DeviceConfig> {
         self.devices.iter().find(|d| d.name == name)
@@ -395,7 +423,6 @@ impl Config {
         DeviceConfig {
             uuid: Uuid::new_v4().to_string(),
             address,
-            device_id,
             device_type,
             name,
             location,

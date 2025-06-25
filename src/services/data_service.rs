@@ -87,7 +87,7 @@ impl DataService {
 
     // NEW: Get IPC information
     pub fn get_ipc_info(&self) -> HashMap<String, String> {
-        let mut info = HashMap::new();
+        let mut info: HashMap<String, String> = HashMap::new();
         info.insert("ipc_uuid".to_string(), self.config.get_ipc_uuid().to_string());
         info.insert("ipc_name".to_string(), self.config.get_ipc_name().to_string());
         info.insert("ipc_version".to_string(), self.config.get_ipc_version().to_string());
@@ -130,7 +130,6 @@ impl DataService {
             let status = if device_config.enabled { "✅ ENABLED" } else { "❌ DISABLED" };
             info!("🏷️  Name: {}", device_config.name);
             info!("🆔 UUID: {}", device_config.uuid);
-            info!("🏭 Device ID: {}", device_config.device_id);
             info!("📡 Modbus Address: {} | Type: {} | Status: {}", 
                   device_config.address, 
                   device_config.device_type, 
@@ -221,8 +220,6 @@ impl DataService {
                       uuid);
                 info!("📍 Location: {}", device_config.location);
                 info!("📡 Modbus Address: {}", device_config.address);
-                info!("🆔 Device ID: {}", device_config.device_id);
-                
                 // Add to devices_data for formatter
                 devices_data.push((device_config.address, device_data.as_ref()));
             } else {

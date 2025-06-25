@@ -410,7 +410,6 @@ impl DynamicConfigManager {
 
                 let new_device = DeviceConfig {
                     address: *address,
-                    device_id,
                     device_type,
                     name: name.clone(),
                     location,
