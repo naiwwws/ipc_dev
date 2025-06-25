@@ -229,6 +229,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .about("Reset configuration to defaults")
                 )
         )
+        .subcommand(
+            Command::new("db")
+                .about("Database operations")
+                .subcommand(Command::new("init").about("Initialize database"))
+                .subcommand(Command::new("stats").about("Show database statistics"))
+                .subcommand(Command::new("query").about("Query database")
+                    .arg(Arg::new("table").short('t').long("table").help("Table name").default_value("device_readings"))
+                    .arg(Arg::new("limit").short('l').long("limit").help("Limit results").default_value("10"))
+                    .arg(Arg::new("device").short('d').long("device").help("Device address filter"))
+                )
+                .subcommand(Command::new("schema").about("Show database schema"))
+        )
         .get_matches();
 
     // Handle config commands FIRST, before creating the service

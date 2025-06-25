@@ -5,6 +5,7 @@ use uuid::Uuid;
 use chrono::Utc;
 
 use crate::config::dynamic_manager::{DynamicConfigManager, ConfigurationCommand, ConfigCommandType, ConfigTarget};
+use crate::config::{DatabaseOutputConfig}; // Add this import
 
 pub async fn handle_config_commands(
     matches: &ArgMatches,
@@ -256,57 +257,165 @@ async fn handle_set_command(
     matches: &ArgMatches,
     config_manager: &DynamicConfigManager,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let target_str = matches.get_one::<String>("target").unwrap();
+    let target = matches.get_one::<String>("target").unwrap();
     let key = matches.get_one::<String>("key").unwrap();
     let value = matches.get_one::<String>("value").unwrap();
-    let operator = matches.get_one::<String>("operator").unwrap_or(&"CLI".to_string()).clone();
+    
+    // Fix the temporary value issue
+    let default_operator = "CLI".to_string();
+    let operator = matches.get_one::<String>("operator").unwrap_or(&default_operator);
 
-    // Parse target
-    let target = match target_str.as_str() {
-        "serial" => ConfigTarget::Serial,
-        "monitoring" => ConfigTarget::Monitoring,
-        "site" => ConfigTarget::Site,
-        "system" => ConfigTarget::System,
-        s if s.starts_with("device:") => {
-            let addr_str = &s[7..]; // Remove "device:" prefix
-            let address: u8 = addr_str.parse().map_err(|_| {
-                format!("Invalid device address: {}", addr_str)
-            })?;
-            ConfigTarget::Device { address }
-        }
-        s if s.starts_with("output:") => {
-            let output_type = s[7..].to_string(); // Remove "output:" prefix
-            ConfigTarget::Output { output_type }
-        }
-        _ => {
-            println!("❌ Invalid target: {}", target_str);
-            println!("💡 Valid targets: serial, monitoring, site, system, device:ADDRESS, output:TYPE");
-            return Ok(true);
-        }
-    };
-
+    // Create the configuration command
     let mut parameters = HashMap::new();
     parameters.insert(key.clone(), value.clone());
 
-    let command = ConfigurationCommand {
-        command_id: Uuid::new_v4().to_string(),
-        timestamp: Utc::now(),
-        operator,
-        command_type: ConfigCommandType::Set,
-        target,
-        parameters,
-        apply_immediately: true,
+    // Parse target to determine ConfigTarget
+    let config_target = if target == "serial" {
+        ConfigTarget::Serial
+    } else if target == "monitoring" {
+        ConfigTarget::Monitoring
+    } else if target == "site" {
+        ConfigTarget::Site
+    } else if target == "system" {
+        ConfigTarget::System
+    } else if target.starts_with("device:") {
+        let address_str = target.strip_prefix("device:").unwrap();
+        let address = address_str.parse::<u8>()
+            .map_err(|_| "Invalid device address")?;
+        ConfigTarget::Device { address }
+    } else if target.starts_with("output:") {
+        let output_type = target.strip_prefix("output:").unwrap().to_string();
+        ConfigTarget::Output { output_type }
+    } else {
+        return Err(format!("Unknown target: {}", target).into());
     };
 
+    // Determine if changes can be applied immediately
+    let apply_immediately = match &config_target {
+        ConfigTarget::Serial => false,
+        ConfigTarget::Monitoring => true,
+        ConfigTarget::Site => true,
+        ConfigTarget::System => true,
+        ConfigTarget::Device { .. } => true,
+        ConfigTarget::Output { .. } => false,
+    };
+
+    let command = ConfigurationCommand {
+        command_id: Uuid::new_v4().to_string(),
+        command_type: ConfigCommandType::Set,
+        target: config_target,
+        parameters,
+        timestamp: Utc::now(),
+        operator: operator.clone(),
+        apply_immediately,
+    };
+
+    // ✅ Fix: Remove type annotation and ? operator
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ {}", response.message);
+        println!("✅ Configuration updated: {} = {}", key, value);
         if response.requires_restart {
             println!("⚠️  Service restart required to apply changes");
         }
     } else {
-        println!("❌ Failed to set parameter: {}", response.message);
+        println!("❌ Failed to update configuration: {}", response.message);
+    }
+
+    // Handle database output configuration using the config manager
+    if target.starts_with("output:database") {
+        let parts: Vec<&str> = target.split(':').collect();
+        if parts.len() >= 3 {
+            let config_key = parts[2];
+            
+            // Get current config from the manager
+            let mut config = config_manager.get_current_config().await;
+            
+            match config_key {
+                "enabled" => {
+                    let enabled = value.parse::<bool>()
+                        .map_err(|_| "Invalid boolean value for enabled")?;
+                    
+                    if config.output.database_output.is_none() {
+                        config.output.database_output = Some(DatabaseOutputConfig::default());
+                    }
+                    config.output.database_output.as_mut().unwrap().enabled = enabled;
+                    
+                    let save_command = ConfigurationCommand {
+                        command_id: Uuid::new_v4().to_string(),
+                        command_type: ConfigCommandType::Set,
+                        target: ConfigTarget::Output { output_type: "database".to_string() },
+                        parameters: {
+                            let mut params = HashMap::new();
+                            params.insert("enabled".to_string(), enabled.to_string());
+                            params
+                        },
+                        timestamp: Utc::now(),
+                        operator: operator.clone(),
+                        apply_immediately: true,
+                    };
+                    // ✅ Fix: Remove ? operator here too
+                    let _save_response = config_manager.execute_command(save_command).await;
+                    println!("✅ Database output enabled: {}", enabled);
+                    return Ok(true);
+                }
+                "database_path" => {
+                    if config.output.database_output.is_none() {
+                        config.output.database_output = Some(DatabaseOutputConfig::default());
+                    }
+                    config.output.database_output.as_mut().unwrap()
+                        .sqlite_config.database_path = value.clone();
+                    
+                    let save_command = ConfigurationCommand {
+                        command_id: Uuid::new_v4().to_string(),
+                        command_type: ConfigCommandType::Set,
+                        target: ConfigTarget::Output { output_type: "database".to_string() },
+                        parameters: {
+                            let mut params = HashMap::new();
+                            params.insert("database_path".to_string(), value.clone());
+                            params
+                        },
+                        timestamp: Utc::now(),
+                        operator: operator.clone(),
+                        apply_immediately: true,
+                    };
+                    // ✅ Fix: Remove ? operator here too
+                    let _save_response = config_manager.execute_command(save_command).await;
+                    println!("✅ Database path set to: {}", value);
+                    return Ok(true);
+                }
+                "batch_size" => {
+                    let batch_size = value.parse::<usize>()
+                        .map_err(|_| "Invalid batch size")?;
+                    
+                    if config.output.database_output.is_none() {
+                        config.output.database_output = Some(DatabaseOutputConfig::default());
+                    }
+                    config.output.database_output.as_mut().unwrap().batch_size = batch_size;
+                    
+                    let save_command = ConfigurationCommand {
+                        command_id: Uuid::new_v4().to_string(),
+                        command_type: ConfigCommandType::Set,
+                        target: ConfigTarget::Output { output_type: "database".to_string() },
+                        parameters: {
+                            let mut params = HashMap::new();
+                            params.insert("batch_size".to_string(), batch_size.to_string());
+                            params
+                        },
+                        timestamp: Utc::now(),
+                        operator: operator.clone(),
+                        apply_immediately: true,
+                    };
+                    // ✅ Fix: Remove ? operator here too
+                    let _save_response = config_manager.execute_command(save_command).await;
+                    println!("✅ Database batch size set to: {}", batch_size);
+                    return Ok(true);
+                }
+                _ => {
+                    return Err(format!("Unknown database config key: {}", config_key).into());
+                }
+            }
+        }
     }
 
     Ok(true)
