@@ -3,20 +3,18 @@ use log::{info, warn, error, debug};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, Duration};
-use uuid::Uuid;
 
-use crate::config::{Config};
+use crate::config::Config;
 use crate::devices::DeviceData;
-use crate::{storage::{DatabaseStats, DeviceReading, SqliteManager}, utils::error::ModbusError};
+use crate::storage::{SqliteManager, FlowmeterReading, FlowmeterStats, DatabaseStats}; // ✅ Add DatabaseStats import
+use crate::utils::error::ModbusError;
 
 pub struct DatabaseService {
-    sqlite_manager: SqliteManager,
     config: Config,
-    batch_buffer: Arc<RwLock<Vec<DeviceReading>>>,
+    sqlite_manager: SqliteManager,
+    flowmeter_batch_buffer: Arc<RwLock<Vec<FlowmeterReading>>>,
     is_running: Arc<RwLock<bool>>,
-    // Channel for graceful shutdown
     shutdown_tx: Option<mpsc::Sender<()>>,
-    shutdown_rx: Option<mpsc::Receiver<()>>,
 }
 
 impl DatabaseService {
@@ -28,49 +26,16 @@ impl DatabaseService {
 
         let sqlite_manager = SqliteManager::new(sqlite_config).await?;
         
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-
         Ok(Self {
-            sqlite_manager,
             config,
-            batch_buffer: Arc::new(RwLock::new(Vec::new())),
+            sqlite_manager,
+            flowmeter_batch_buffer: Arc::new(RwLock::new(Vec::new())),
             is_running: Arc::new(RwLock::new(false)),
-            shutdown_tx: Some(shutdown_tx),
-            shutdown_rx: Some(shutdown_rx),
+            shutdown_tx: None,
         })
     }
 
-    // Start the database service with background tasks
-    pub async fn start(&mut self) -> Result<(), ModbusError> {
-        info!("🚀 Starting Database Service");
-        
-        *self.is_running.write().await = true;
-        
-        // Start background batch processor
-        let buffer_clone = Arc::clone(&self.batch_buffer);
-        let manager_clone = self.sqlite_manager.clone();
-        let config_clone = self.config.clone();
-        let running_clone = Arc::clone(&self.is_running);
-        let shutdown_rx = self.shutdown_rx.take().unwrap(); // Remove mut
-
-        tokio::spawn(async move {
-            Self::batch_processor(
-                buffer_clone,
-                manager_clone,
-                config_clone,
-                running_clone,
-                shutdown_rx,
-            ).await;
-        });
-
-        // Start maintenance tasks
-        self.start_maintenance_tasks().await;
-        
-        info!("✅ Database Service started successfully");
-        Ok(())
-    }
-
-    // Store device data efficiently
+    // ✅ Store flowmeter data as unified structure
     pub async fn store_device_data(
         &self,
         device_uuid: &str,
@@ -80,71 +45,95 @@ impl DatabaseService {
         device_location: &str,
         device_data: &dyn DeviceData,
     ) -> Result<(), ModbusError> {
-        let parameters = device_data.get_all_parameters();
-        let mut readings = Vec::new();
+        // Only support flowmeter data with unified storage
+        if device_type.to_lowercase() == "flowmeter" {
+            if let Some(flowmeter_data) = device_data.as_any().downcast_ref::<crate::devices::FlowmeterData>() {
+                let flowmeter_reading = FlowmeterReading::from_flowmeter_data(
+                    device_uuid.to_string(),
+                    device_address,
+                    device_name.to_string(),
+                    device_location.to_string(),
+                    flowmeter_data,
+                    self.config.get_ipc_uuid().to_string(),
+                    self.config.site_info.site_id.clone(),
+                );
 
-        // Convert device parameters to database readings
-        for (param_name, param_value) in parameters {
-            let reading = DeviceReading::new(
-                device_uuid.to_string(),
-                device_address,
-                device_type.to_string(),
-                device_name.to_string(),
-                device_location.to_string(),
-                param_name,
-                param_value,
-                self.config.get_ipc_uuid().to_string(),
-                self.config.site_info.site_id.clone(),
-            );
-            readings.push(reading);
+                self.add_flowmeter_to_batch(vec![flowmeter_reading]).await?;
+                self.sqlite_manager.update_device_status(device_uuid, device_address, "ONLINE").await?;
+                
+                return Ok(());
+            }
         }
 
-        // Add to batch buffer
-        self.add_to_batch(readings).await?;
-        
-        // Update device status
-        self.sqlite_manager.update_device_status(device_uuid, device_address, "ONLINE").await?;
-
+        // Reject non-flowmeter devices
+        warn!("⚠️  Only flowmeter devices are supported in the unified storage system");
         Ok(())
     }
 
-    // Add readings to batch buffer
-    async fn add_to_batch(&self, mut readings: Vec<DeviceReading>) -> Result<(), ModbusError> {
-        let batch_id = Uuid::new_v4().to_string();
-        
-        // Set batch ID for all readings
-        for reading in &mut readings {
-            reading.batch_id = Some(batch_id.clone());
+    // ✅ Add flowmeter readings to batch
+    async fn add_flowmeter_to_batch(&self, readings: Vec<FlowmeterReading>) -> Result<(), ModbusError> {
+        if readings.is_empty() {
+            return Ok(());
         }
-
-        let mut buffer = self.batch_buffer.write().await;
-        buffer.extend(readings);
 
         let batch_size = self.config.output.database_output
             .as_ref()
-            .map(|db| db.sqlite_config.batch_size)
+            .map(|db| db.batch_size)
             .unwrap_or(100);
 
-        // Trigger immediate flush if buffer is full
-        if buffer.len() >= batch_size {
-            let readings_to_flush = buffer.drain(..).collect();
-            drop(buffer); // Release lock early
+        let should_flush = {
+            let mut buffer = self.flowmeter_batch_buffer.write().await;
+            buffer.extend(readings);
+            buffer.len() >= batch_size
+        };
 
-            // Spawn background task for insertion
-            let manager_clone = self.sqlite_manager.clone();
-            tokio::spawn(async move {
-                if let Err(e) = manager_clone.batch_insert_readings(readings_to_flush).await {
-                    error!("Failed to flush batch to database: {}", e);
-                }
-            });
+        if should_flush {
+            let readings_to_flush = {
+                let mut buffer = self.flowmeter_batch_buffer.write().await;
+                buffer.drain(..).collect::<Vec<_>>()
+            };
+
+            if !readings_to_flush.is_empty() {
+                let manager = self.sqlite_manager.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = manager.batch_insert_flowmeter_readings(readings_to_flush).await {
+                        error!("Failed to flush flowmeter batch to database: {}", e);
+                    }
+                });
+            }
         }
 
         Ok(())
     }
 
-    // Background batch processor
-    async fn batch_processor(
-        buffer: Arc<RwLock<Vec<DeviceReading>>>,
+    // ✅ Start batch processor for flowmeter data
+    pub async fn start(&mut self) -> Result<(), ModbusError> {
+        if *self.is_running.read().await {
+            return Ok(());
+        }
+
+        *self.is_running.write().await = true;
+
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        self.shutdown_tx = Some(shutdown_tx);
+
+        // Start flowmeter batch processor
+        let buffer = self.flowmeter_batch_buffer.clone();
+        let manager = self.sqlite_manager.clone();
+        let config = self.config.clone();
+        let is_running = self.is_running.clone();
+
+        tokio::spawn(async move {
+            Self::flowmeter_batch_processor(buffer, manager, config, is_running, shutdown_rx).await;
+        });
+
+        info!("🚀 Flowmeter database service started");
+        Ok(())
+    }
+
+    // ✅ Flowmeter batch processor
+    async fn flowmeter_batch_processor(
+        buffer: Arc<RwLock<Vec<FlowmeterReading>>>,
         manager: SqliteManager,
         config: Config,
         is_running: Arc<RwLock<bool>>,
@@ -153,37 +142,35 @@ impl DatabaseService {
         let flush_interval = Duration::from_secs(
             config.output.database_output
                 .as_ref()
-                .and_then(|db| Some(30)) // 30 seconds default flush interval
-                .unwrap_or(30)
+                .map(|db| db.flush_interval_seconds)
+                .unwrap_or(60)
         );
 
-        let mut interval_timer = interval(flush_interval);
+        let mut interval = interval(flush_interval);
 
-        loop {
+        info!("🔄 Flowmeter batch processor started with {}s intervals", flush_interval.as_secs());
+
+        while *is_running.read().await {
             tokio::select! {
-                _ = interval_timer.tick() => {
-                    if !*is_running.read().await {
-                        break;
-                    }
-                    
-                    // Flush buffer periodically
+                _ = interval.tick() => {
                     let readings_to_flush = {
                         let mut buffer_guard = buffer.write().await;
-                        if buffer_guard.is_empty() {
+                        if !buffer_guard.is_empty() {
+                            buffer_guard.drain(..).collect::<Vec<_>>()
+                        } else {
                             continue;
                         }
-                        buffer_guard.drain(..).collect::<Vec<_>>()
                     };
 
                     if !readings_to_flush.is_empty() {
-                        debug!("⏰ Periodic flush: {} readings", readings_to_flush.len());
-                        if let Err(e) = manager.batch_insert_readings(readings_to_flush).await {
-                            error!("Failed to flush periodic batch: {}", e);
+                        debug!("⏰ Periodic flush: {} flowmeter readings", readings_to_flush.len());
+                        if let Err(e) = manager.batch_insert_flowmeter_readings(readings_to_flush).await {
+                            error!("Failed to flush flowmeter batch: {}", e);
                         }
                     }
                 }
                 _ = shutdown_rx.recv() => {
-                    info!("📥 Received shutdown signal for batch processor");
+                    info!("📥 Received shutdown signal for flowmeter batch processor");
                     break;
                 }
             }
@@ -196,63 +183,30 @@ impl DatabaseService {
         };
 
         if !final_readings.is_empty() {
-            info!("🔄 Final flush: {} readings", final_readings.len());
-            if let Err(e) = manager.batch_insert_readings(final_readings).await {
-                error!("Failed to flush final batch: {}", e);
+            info!("🔄 Final flowmeter flush: {} readings", final_readings.len());
+            if let Err(e) = manager.batch_insert_flowmeter_readings(final_readings).await {
+                error!("Failed to flush final flowmeter batch: {}", e);
             }
         }
 
-        info!("🏁 Batch processor stopped");
+        info!("🏁 Flowmeter batch processor stopped");
     }
 
-    // Start maintenance tasks
-    async fn start_maintenance_tasks(&self) {
-        let manager_clone = self.sqlite_manager.clone();
-        let running_clone = Arc::clone(&self.is_running);
-
-        // Database cleanup task (runs daily)
-        tokio::spawn(async move {
-            let mut cleanup_interval = interval(Duration::from_secs(24 * 60 * 60)); // 24 hours
-            
-            loop {
-                cleanup_interval.tick().await;
-                
-                if !*running_clone.read().await {
-                    break;
-                }
-
-                info!("🧹 Running daily database maintenance");
-                
-                // Keep 30 days of data by default
-                if let Err(e) = manager_clone.cleanup_old_data(30).await {
-                    warn!("Database cleanup failed: {}", e);
-                } else {
-                    info!("✅ Database cleanup completed");
-                }
-            }
-        });
+    // ✅ Get flowmeter readings
+    pub async fn get_recent_flowmeter_readings(&self, limit: i64) -> Result<Vec<FlowmeterReading>, ModbusError> {
+        self.sqlite_manager.get_recent_flowmeter_readings(limit, 0).await
     }
 
-    // Fix the return type for get_stats method
-    pub async fn get_stats(&self) -> Result<DatabaseStats, ModbusError> {
-        self.sqlite_manager.get_database_stats().await
-    }
-
-    // Get recent readings for CLI/monitoring
-    pub async fn get_recent_readings(&self, limit: i64) -> Result<Vec<DeviceReading>, ModbusError> {
-        self.sqlite_manager.get_recent_readings(limit, 0).await
-    }
-
-    // Get readings for specific device
-    pub async fn get_device_readings(
+    // ✅ Get device flowmeter readings
+    pub async fn get_device_flowmeter_readings(
         &self,
         device_uuid: &str,
         hours_back: Option<i64>,
         limit: Option<i64>,
-    ) -> Result<Vec<DeviceReading>, ModbusError> {
+    ) -> Result<Vec<FlowmeterReading>, ModbusError> {
         let start_time = hours_back.map(|hours| Utc::now() - chrono::Duration::hours(hours));
         
-        self.sqlite_manager.get_device_readings(
+        self.sqlite_manager.get_device_flowmeter_readings(
             device_uuid,
             start_time,
             None,
@@ -260,45 +214,50 @@ impl DatabaseService {
         ).await
     }
 
-    // Force flush buffer (useful for testing or manual operations)
-    pub async fn flush_buffer(&self) -> Result<usize, ModbusError> {
+    // ✅ Get flowmeter statistics
+    pub async fn get_flowmeter_stats(&self) -> Result<FlowmeterStats, ModbusError> {
+        self.sqlite_manager.get_flowmeter_stats().await
+    }
+
+    // ✅ Force flush flowmeter buffer
+    pub async fn flush_flowmeter_buffer(&self) -> Result<usize, ModbusError> {
         let readings_to_flush = {
-            let mut buffer = self.batch_buffer.write().await;
+            let mut buffer = self.flowmeter_batch_buffer.write().await;
+            if buffer.is_empty() {
+                return Ok(0);
+            }
             buffer.drain(..).collect::<Vec<_>>()
         };
 
         let count = readings_to_flush.len();
-        if count > 0 {
-            self.sqlite_manager.batch_insert_readings(readings_to_flush).await?;
-            info!("🔄 Manual flush completed: {} readings", count);
-        }
-
+        self.sqlite_manager.batch_insert_flowmeter_readings(readings_to_flush).await?;
+        info!("🔄 Manual flowmeter flush: {} readings inserted", count);
         Ok(count)
     }
 
-    // Graceful shutdown
+    // ✅ Graceful shutdown
     pub async fn shutdown(&mut self) -> Result<(), ModbusError> {
-        info!("🛑 Shutting down Database Service");
+        info!("🛑 Shutting down database service...");
         
         *self.is_running.write().await = false;
         
-        // Signal shutdown to background tasks
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(()).await;
         }
-
-        // Flush remaining data
-        self.flush_buffer().await?;
         
-        // Close database connections
-        self.sqlite_manager.close().await;
+        // Force final flush
+        let _ = self.flush_flowmeter_buffer().await;
         
-        info!("✅ Database Service shutdown completed");
+        info!("✅ Database service shutdown complete");
         Ok(())
+    }
+
+    // ✅ Add the missing get_stats method
+    pub async fn get_stats(&self) -> Result<DatabaseStats, ModbusError> {
+        self.sqlite_manager.get_database_stats().await
     }
 }
 
-// Implement Drop for cleanup
 impl Drop for DatabaseService {
     fn drop(&mut self) {
         info!("💧 DatabaseService dropped");

@@ -1,6 +1,5 @@
 pub mod sqlite_manager;
 pub mod models;
-pub mod migrations;
 
-pub use sqlite_manager::{SqliteManager, DatabaseStats};
-pub use models::{DeviceReading, DeviceStatus, SystemMetrics};
+pub use models::{FlowmeterReading, FlowmeterStats, DeviceStatus, SystemMetrics};
+pub use sqlite_manager::{SqliteManager, DatabaseStats}; // ✅ Add DatabaseStats export

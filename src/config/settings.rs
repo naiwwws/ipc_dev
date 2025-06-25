@@ -133,7 +133,6 @@ impl Default for SqliteConfig {
             enable_wal: true,
             cache_size: 1000,
             auto_vacuum: true,
-            // Add defaults for missing fields
             batch_size: 100,
             busy_timeout_ms: 30000,
             wal_mode: true,
