@@ -139,6 +139,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .arg(Arg::new("device").help("Device address").required(true).index(1))
         )
         .subcommand(
+            Command::new("flowmeter")
+                .about("Flowmeter-specific operations")
+                .subcommand(
+                    Command::new("query")
+                        .about("Query flowmeter data from database")
+                        .arg(Arg::new("device")
+                            .help("Device address")
+                            .required(true)
+                            .index(1))
+                        .arg(Arg::new("limit")
+                            .long("limit")
+                            .short('l')
+                            .help("Number of records to retrieve")
+                            .default_value("10"))
+                )
+                .subcommand(
+                    Command::new("stats")
+                        .about("Show flowmeter statistics")
+                )
+                .subcommand(
+                    Command::new("recent")
+                        .about("Show recent flowmeter readings")
+                        .arg(Arg::new("limit")
+                            .long("limit")
+                            .short('l')
+                            .help("Number of recent readings")
+                            .default_value("20"))
+                )
+        )
+        .subcommand(
             Command::new("config")
                 .about("Dynamic configuration management")
                 .subcommand(

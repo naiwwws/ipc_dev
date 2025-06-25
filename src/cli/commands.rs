@@ -1,5 +1,6 @@
 use clap::ArgMatches;
 use log::info;
+use anyhow::{Result, anyhow}; // ✅ Add anyhow macro import
 
 use crate::services::DataService;
 use crate::devices::flowmeter::FlowmeterDevice;
@@ -9,7 +10,7 @@ use crate::output::raw_sender::{RawDataSender, RawDataFormat};
 pub async fn handle_subcommands(
     matches: &ArgMatches,
     service: &mut DataService,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> Result<bool> {  
     
     // Configure output format
     if let Some(format) = matches.get_one::<String>("format") {
@@ -37,7 +38,7 @@ pub async fn handle_subcommands(
         info!("🔍 Executing getdata command...");
         
         service.read_all_devices_once().await?;
-        service.print_all_device_data().await?;  // This should trigger file output
+        service.print_all_device_data().await?;
         
         return Ok(true);
     }
@@ -75,9 +76,8 @@ pub async fn handle_subcommands(
         info!("🔍 Executing getrawdata command...");
         
         let device_address: u8 = matches.get_one::<String>("device").unwrap().parse()
-            .map_err(|_| "Invalid device address")?;
+            .map_err(|_| anyhow!("Invalid device address"))?; // ✅ Fix this line
         
-        // ✅ Fix: Create a binding for the default value
         let default_format = "hex".to_string();
         let format = matches.get_one::<String>("format").unwrap_or(&default_format);
         
@@ -95,23 +95,30 @@ pub async fn handle_subcommands(
         info!("🔍 Executing compare-raw command...");
         
         let device_address: u8 = matches.get_one::<String>("device").unwrap().parse()
-            .map_err(|_| "Invalid device address")?;
+            .map_err(|_| anyhow!("Invalid device address"))?; // ✅ Fix this line
         
-        service.compare_raw_vs_processed(device_address).await?; // Use correct method name
+        service.compare_raw_vs_processed(device_address).await?;
         
         return Ok(true);
     }
 
-    // Replace old database commands with flowmeter-specific ones
-
-    if let Some(matches) = matches.subcommand_matches("flowmeter") {
+    // Handle database commands (modify existing db handling)
+    if let Some(matches) = matches.subcommand_matches("db") {
         if let Some(sub_matches) = matches.subcommand_matches("query") {
-            let device_address: u8 = sub_matches.get_one::<String>("device").unwrap().parse()
-                .map_err(|_| "Invalid device address")?;
-            let limit: i64 = sub_matches.get_one::<String>("limit").unwrap_or(&"10".to_string()).parse()
-                .map_err(|_| "Invalid limit")?;
+            let device_address: Option<u8> = sub_matches.get_one::<String>("device")
+                .and_then(|s| s.parse().ok());
+            let limit: i64 = sub_matches.get_one::<String>("limit")
+                .unwrap_or(&"10".to_string())
+                .parse()
+                .map_err(|_| anyhow!("Invalid limit"))?; // ✅ Fix this line
                 
-            service.query_flowmeter_data(device_address, limit).await?;
+            if let Some(addr) = device_address {
+                service.query_flowmeter_data(addr, limit).await?;
+            } else {
+                // Query all devices
+                println!("📋 Querying all devices (last {}):", limit);
+                // Add logic for querying all devices
+            }
             return Ok(true);
         }
         
@@ -120,25 +127,7 @@ pub async fn handle_subcommands(
             return Ok(true);
         }
         
-        if let Some(_) = matches.subcommand_matches("recent") {
-            let limit: i64 = matches.get_one::<String>("limit").unwrap_or(&"20".to_string()).parse()
-                .map_err(|_| "Invalid limit")?;
-                
-            if let Some(db_service) = &service.get_database_service() {
-                let readings = db_service.get_recent_flowmeter_readings(limit).await?;
-                
-                println!("📋 Recent flowmeter readings (last {}):", limit);
-                for reading in readings {
-                    println!("Device {}: {:.2} kg/h, {:.1}°C at {}", 
-                        reading.device_address,
-                        reading.mass_flow_rate,
-                        reading.temperature,
-                        reading.timestamp.format("%H:%M:%S")
-                    );
-                }
-            }
-            return Ok(true);
-        }
+        // Handle other db subcommands...
     }
 
     Ok(false)
