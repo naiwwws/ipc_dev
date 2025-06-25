@@ -10,8 +10,6 @@ pub trait Device: Send + Sync {
     fn device_type(&self) -> &str;
     fn address(&self) -> u8;
     fn name(&self) -> &str;
-
-    // Add this method to Device trait
     fn as_any(&self) -> &dyn Any;
 
     async fn read_data(&self, client: &dyn ModbusClientTrait) -> Result<Box<dyn DeviceData>, ModbusError>;
@@ -25,4 +23,15 @@ pub trait DeviceData: Send + Sync {
     fn get_parameter(&self, name: &str) -> Option<String>;
     fn get_all_parameters(&self) -> Vec<(String, String)>;
     fn device_address(&self) -> u8;
+
+    fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
+    fn device_type(&self) -> String {
+        "unknown".to_string()
+    }
+    fn device_name(&self) -> String {
+        format!("Device {}", self.device_address())
+    }
+    fn device_location(&self) -> String {
+        "Unknown".to_string()
+    }
 }

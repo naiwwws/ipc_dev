@@ -1,4 +1,6 @@
+use chrono::{DateTime, Utc};
 use clap::ArgMatches;
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -101,11 +103,9 @@ pub struct MqttOutputConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseOutputConfig {
     pub enabled: bool,
-    pub connection_string: String,
-    pub table_name: String,
-    pub batch_insert: bool,
-    // NEW: SQLite specific settings
     pub sqlite_config: SqliteConfig,
+    pub batch_size: usize,
+    pub flush_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,26 +113,43 @@ pub struct SqliteConfig {
     pub database_path: String,
     pub max_connections: u32,
     pub connection_timeout_seconds: u64,
-    pub batch_size: usize,
+    pub enable_wal: bool,
+    pub cache_size: i32,
     pub auto_vacuum: bool,
-    pub wal_mode: bool,          // Write-Ahead Logging for better performance
-    pub sync_mode: String,       // NORMAL, FULL, OFF
-    pub cache_size_kb: i64,      // SQLite cache size
-    pub busy_timeout_ms: u32,    // Timeout for busy database
+    // Add missing fields that sqlite_manager.rs expects
+    pub batch_size: usize,
+    pub busy_timeout_ms: u64,
+    pub wal_mode: bool,
+    pub sync_mode: String,
+    pub cache_size_kb: i32,
 }
 
 impl Default for SqliteConfig {
     fn default() -> Self {
         Self {
-            database_path: "./data/sensor_data.db".to_string(),
-            max_connections: 5,
+            database_path: "data/sensor_data.db".to_string(),
+            max_connections: 10,
             connection_timeout_seconds: 30,
-            batch_size: 100,
+            enable_wal: true,
+            cache_size: 1000,
             auto_vacuum: true,
+            // Add defaults for missing fields
+            batch_size: 100,
+            busy_timeout_ms: 30000,
             wal_mode: true,
             sync_mode: "NORMAL".to_string(),
-            cache_size_kb: 2048, // 2MB cache
-            busy_timeout_ms: 5000,
+            cache_size_kb: 1000,
+        }
+    }
+}
+
+impl Default for DatabaseOutputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sqlite_config: SqliteConfig::default(),
+            batch_size: 100,
+            flush_interval_seconds: 60,
         }
     }
 }
@@ -263,10 +280,9 @@ impl Default for Config {
                 mqtt_output: None,
                 database_output: Some(DatabaseOutputConfig {
                     enabled: true,
-                    connection_string: "sqlite:./data/sensor_data.db".to_string(),
-                    table_name: "device_readings".to_string(),
-                    batch_insert: true,
                     sqlite_config: SqliteConfig::default(),
+                    batch_size: 100,
+                    flush_interval_seconds: 60,
                 }),
             },
             

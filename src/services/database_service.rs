@@ -5,10 +5,9 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
-use crate::config::{Config, SqliteConfig};
+use crate::config::{Config};
 use crate::devices::DeviceData;
-use crate::storage::{SqliteManager, DeviceReading};
-use crate::utils::error::ModbusError;
+use crate::{storage::{DatabaseStats, DeviceReading, SqliteManager}, utils::error::ModbusError};
 
 pub struct DatabaseService {
     sqlite_manager: SqliteManager,
@@ -52,7 +51,7 @@ impl DatabaseService {
         let manager_clone = self.sqlite_manager.clone();
         let config_clone = self.config.clone();
         let running_clone = Arc::clone(&self.is_running);
-        let mut shutdown_rx = self.shutdown_rx.take().unwrap();
+        let shutdown_rx = self.shutdown_rx.take().unwrap(); // Remove mut
 
         tokio::spawn(async move {
             Self::batch_processor(
@@ -234,8 +233,8 @@ impl DatabaseService {
         });
     }
 
-    // Get database statistics
-    pub async fn get_stats(&self) -> Result<crate::storage::sqlite_manager::DatabaseStats, ModbusError> {
+    // Fix the return type for get_stats method
+    pub async fn get_stats(&self) -> Result<DatabaseStats, ModbusError> {
         self.sqlite_manager.get_database_stats().await
     }
 

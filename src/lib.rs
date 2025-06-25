@@ -11,13 +11,15 @@ pub mod services;
 pub mod output;
 pub mod utils;
 pub mod cli;
+pub mod storage;
 
 // Re-export commonly used types
 pub use config::Config;
 pub use services::DataService;
 pub use devices::{Device, DeviceData, FlowmeterDevice, FlowmeterData};
 pub use modbus::ModbusClient;
-pub use output::{DataFormatter, DataSender, ConsoleFormatter, JsonFormatter, CsvFormatter, HexFormatter}; // Add HexFormatter
+pub use output::{DataFormatter, DataSender, ConsoleFormatter, JsonFormatter, CsvFormatter, HexFormatter};
 pub use utils::error::ModbusError;
+pub use storage::{SqliteManager, DeviceReading, DatabaseStats};
 
 pub const VERSION: &str = "1.0.0";

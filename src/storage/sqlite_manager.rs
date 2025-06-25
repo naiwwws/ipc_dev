@@ -1,12 +1,12 @@
 use chrono::{DateTime, Utc};
 use log::{info, warn, error, debug};
-use sqlx::{Pool, Sqlite, SqlitePool, Row};
+use sqlx::{Pool, Sqlite, SqlitePool}; // Remove Row
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use std::sync::Arc;
 
-use crate::config::SqliteConfig;
+use crate::config::settings::SqliteConfig; // Fix import path
 use crate::storage::models::{DeviceReading, DeviceStatus, SystemMetrics};
 use crate::utils::error::ModbusError;
 
@@ -31,7 +31,7 @@ impl SqliteManager {
             "sqlite:{}?cache=shared&_busy_timeout={}&_journal_mode={}",
             config.database_path,
             config.busy_timeout_ms,
-            if config.wal_mode { "WAL" } else { "DELETE" }
+            if config.enable_wal { "WAL" } else { "DELETE" } // Use enable_wal instead of wal_mode
         );
 
         info!("🗄️  Initializing SQLite database: {}", config.database_path);
@@ -41,8 +41,8 @@ impl SqliteManager {
             sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(&config.database_path)
                 .create_if_missing(true)
-                .busy_timeout(Duration::from_millis(config.busy_timeout_ms as u64))
-                .journal_mode(if config.wal_mode {
+                .busy_timeout(Duration::from_millis(config.busy_timeout_ms))
+                .journal_mode(if config.enable_wal { // Use enable_wal instead of wal_mode
                     sqlx::sqlite::SqliteJournalMode::Wal
                 } else {
                     sqlx::sqlite::SqliteJournalMode::Delete
@@ -58,7 +58,7 @@ impl SqliteManager {
         })?;
 
         // Apply performance optimizations
-        sqlx::query(&format!("PRAGMA cache_size = -{}", config.cache_size_kb))
+        sqlx::query(&format!("PRAGMA cache_size = -{}", config.cache_size)) // Use cache_size instead of cache_size_kb
             .execute(&pool)
             .await
             .map_err(|e| ModbusError::CommunicationError(format!("Failed to set cache size: {}", e)))?;
@@ -181,19 +181,14 @@ impl SqliteManager {
             return Ok(0);
         }
 
-        let batch_size = self.config.batch_size;
-        let total_count = readings.len();
-        
-        debug!("📦 Starting batch insert of {} readings", total_count);
-
-        // Process in chunks to avoid memory issues
+        let batch_size = self.config.batch_size; // This should now work
         let mut total_inserted = 0;
+
         for chunk in readings.chunks(batch_size) {
             let inserted = self.insert_readings_chunk(chunk).await?;
             total_inserted += inserted;
         }
 
-        info!("✅ Batch insert completed: {} readings inserted", total_inserted);
         Ok(total_inserted)
     }
 

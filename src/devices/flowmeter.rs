@@ -212,6 +212,14 @@ impl DeviceData for FlowmeterData {
     fn device_address(&self) -> u8 {
         self.device_address
     }
+    
+    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+        self.timestamp
+    }
+    
+    fn device_type(&self) -> String {
+        "flowmeter".to_string()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

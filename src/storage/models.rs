@@ -70,14 +70,14 @@ impl DeviceReading {
             device_name,
             device_location,
             parameter_name,
-            parameter_value,
+            parameter_value: parameter_value.clone(), // Clone here to avoid move
             parameter_unit: None,
-            raw_value: parameter_value.parse().ok(),
+            raw_value: parameter_value.parse().ok(), // Use original here
             timestamp: Utc::now(),
+            batch_id: None,
             ipc_uuid,
             site_id,
-            batch_id: None,
-            quality_flag: "GOOD".to_string(),
+            quality_flag: "GOOD".to_string(), // Default value for quality_flag
         }
     }
 }

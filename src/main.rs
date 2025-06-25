@@ -5,6 +5,7 @@ mod modbus;
 mod devices;
 mod utils;
 mod output;
+mod storage; // Add this line
 
 use anyhow::Result;
 use clap::{Arg, Command};
@@ -128,39 +129,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .subcommand(
             Command::new("getrawdata")
                 .about("Get raw device data for debugging")
-                .arg(
-                    Arg::new("device")
-                        .long("device")
-                        .short('d')
-                        .value_name("ADDRESS")
-                        .help("Specific device address (optional)")
-                )
-                .arg(
-                    Arg::new("format")
-                        .long("format")
-                        .short('f')
-                        .value_name("FORMAT")
-                        .help("Output format: debug, hex, json, binary")
-                        .value_parser(["debug", "hex", "json", "binary"])
-                        .default_value("debug")
-                )
-                .arg(
-                    Arg::new("output")
-                        .long("output")
-                        .short('o')
-                        .value_name("FILE")
-                        .help("Output file path")
-                )
+                .arg(Arg::new("device").long("device").help("Device address").required(true))
+                .arg(Arg::new("format").long("format").help("Output format").default_value("hex"))
+                .arg(Arg::new("output").long("output").help("Output file path"))
         )
         .subcommand(
             Command::new("compare-raw")
                 .about("Compare raw vs processed data")
-                .arg(
-                    Arg::new("device")
-                        .help("Device address")
-                        .required(true)
-                        .index(1)
-                )
+                .arg(Arg::new("device").help("Device address").required(true).index(1))
         )
         .subcommand(
             Command::new("config")

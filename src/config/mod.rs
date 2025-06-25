@@ -1,6 +1,6 @@
 pub mod settings;
 pub mod dynamic_manager;
-pub mod config_commands;  // Add this
+pub mod config_commands;
 pub mod mqtt_handler;
 
 pub use settings::{
@@ -14,6 +14,7 @@ pub use settings::{
     HttpOutputConfig,
     MqttOutputConfig,
     DatabaseOutputConfig,
+    SqliteConfig,  // Add this
     RegisterConfig
 };
 pub use dynamic_manager::{

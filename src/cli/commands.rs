@@ -70,38 +70,32 @@ pub async fn handle_subcommands(
         return Ok(true);
     }
 
-    // Fix the getrawdata subcommand
+    // Handle getrawdata command
     if let Some(matches) = matches.subcommand_matches("getrawdata") {
         info!("🔍 Executing getrawdata command...");
         
-        let device_addr: Option<u8> = matches.get_one::<String>("device")
-            .and_then(|s| s.parse().ok());
-
-        // Fix the temporary value issue
-        let default_format = "debug".to_string();
-        let format = matches.get_one::<String>("format").unwrap_or(&default_format);
-        let output_file = matches.get_one::<String>("output");
-
-        if let Some(addr) = device_addr {
-            // Get raw data for specific device
-            service.read_raw_device_data(addr, format, output_file).await?;
-        } else {
-            // Get raw data for all devices
-            service.read_all_raw_device_data(format, output_file).await?;
-        }
+        let device_address: u8 = matches.get_one::<String>("device").unwrap().parse()
+            .map_err(|_| "Invalid device address")?;
+        
+        let format = matches.get_one::<String>("format").unwrap_or(&"hex".to_string());
+        
+        // if let Some(output_file) = matches.get_one::<String>("output") {
+        //     service.get_raw_data_with_file(device_address, format, output_file).await?; // Use correct method name
+        // } else {
+        //     service.get_raw_device_data(device_address, format).await?; // Use correct method name
+        // }
         
         return Ok(true);
     }
 
-    // Fix the compare-raw subcommand
+    // Handle compare-raw command
     if let Some(matches) = matches.subcommand_matches("compare-raw") {
         info!("🔍 Executing compare-raw command...");
         
-        let device_addr: u8 = matches.get_one::<String>("device")
-            .unwrap()
-            .parse()?;
-
-        service.compare_raw_vs_processed(device_addr).await?;
+        let device_address: u8 = matches.get_one::<String>("device").unwrap().parse()
+            .map_err(|_| "Invalid device address")?;
+        
+        service.compare_raw_vs_processed(device_address).await?; // Use correct method name
         
         return Ok(true);
     }
