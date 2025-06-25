@@ -1,5 +1,6 @@
 use log::{error, info, warn};
 use std::collections::HashMap;
+use std::fmt::Pointer;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, interval, Duration};
 
@@ -7,7 +8,7 @@ use crate::config::Config;
 use crate::modbus::ModbusClient;
 use crate::devices::{Device, DeviceData, FlowmeterDevice};
 use crate::output::{DataFormatter, DataSender, ConsoleFormatter, ConsoleSender};
-use crate::output::raw_sender::{RawDataSender, RawDataFormat}; // ✅ ADD THIS IMPORT
+use crate::output::raw_sender::{RawDataSender, RawDataFormat};
 use crate::services::DatabaseService;
 use crate::utils::error::ModbusError;
 
@@ -19,7 +20,7 @@ pub struct DataService {
     modbus_client: Arc<ModbusClient>,
     formatter: Box<dyn DataFormatter>,
     senders: Vec<Box<dyn DataSender>>,
-    database_service: Option<DatabaseService>, // ✅ Make this public for CLI access
+    database_service: Option<DatabaseService>,
 }
 
 impl DataService {
@@ -48,30 +49,14 @@ impl DataService {
             }
         }
 
-        // ✅ Initialize database service if enabled
-        let database_service = if config.output.database_output
-            .as_ref()
-            .map(|db| db.enabled)
-            .unwrap_or(false) 
-        {
-            info!("🗄️  Initializing database service...");
-            match DatabaseService::new(config.clone()).await {
-                Ok(mut db_service) => {
-                    if let Err(e) = db_service.start().await {
-                        error!("❌ Failed to start database service: {}", e);
-                        None
-                    } else {
-                        info!("✅ Database service initialized successfully");
-                        Some(db_service)
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Failed to initialize database service: {}", e);
-                    None
-                }
-            }
+        // ✅ Initialize and start database service
+        let database_service = if config.output.database_output.as_ref().map(|db| db.enabled).unwrap_or(false) {
+            let mut db_service = DatabaseService::new(config.clone()).await?;
+            db_service.start().await?;
+            info!("💾 Database service initialized and started");
+            Some(db_service)
         } else {
-            info!("📝 Database storage disabled");
+            info!("📝 Database service disabled");
             None
         };
 
@@ -79,7 +64,7 @@ impl DataService {
         let mut senders: Vec<Box<dyn DataSender>> = Vec::new();
         senders.push(Box::new(ConsoleSender));
 
-        Ok(Self {
+        Ok(DataService {
             config,
             devices,
             device_data: Arc::new(Mutex::new(HashMap::new())),
@@ -87,11 +72,16 @@ impl DataService {
             modbus_client: Arc::new(modbus_client),
             formatter,
             senders,
-            database_service, // ✅ Add this field
+            database_service,
         })
     }
 
-    // ✅ Add the database storage method
+    // ✅ Helper method to get device config by address
+    fn get_device_config_by_address(&self, address: u8) -> Option<&crate::config::DeviceConfig> {
+        self.config.devices.iter().find(|d| d.address == address)
+    }
+
+    // ✅ Database storage method
     async fn store_device_data_to_database(
         &self,
         device_address: u8,
@@ -99,7 +89,7 @@ impl DataService {
     ) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
             if let Some(uuid) = self.get_uuid_from_address(device_address) {
-                if let Some(device_config) = self.config.get_device_by_uuid(uuid) {
+                if let Some(device_config) = self.get_device_config_by_address(device_address) {
                     db_service.store_device_data(
                         uuid,
                         device_address,
@@ -111,7 +101,7 @@ impl DataService {
                     
                     info!("💾 Stored data for device {} to database", device_address);
                 } else {
-                    warn!("⚠️  Device config not found for UUID: {}", uuid);
+                    warn!("⚠️  Device config not found for address: {}", device_address);
                 }
             } else {
                 warn!("⚠️  UUID not found for device address: {}", device_address);
@@ -125,7 +115,7 @@ impl DataService {
         self.device_address_to_uuid.get(&address)
     }
 
-    // ✅ Update the run method to store data
+    // ✅ Fixed run method
     pub async fn run(&self, debug_output: bool) -> Result<(), ModbusError> {
         info!("🚀 Starting continuous monitoring");
         if self.database_service.is_some() {
@@ -178,32 +168,47 @@ impl DataService {
         }
     }
 
-    // ✅ Update single read method to store data
+    // ✅ Fixed read_all_devices_once method
     pub async fn read_all_devices_once(&self) -> Result<(), ModbusError> {
         info!("📖 Reading data from all devices once...");
+        
+        let mut all_data = Vec::new();
         
         for device in &self.devices {
             match device.read_data(self.modbus_client.as_ref()).await {
                 Ok(data) => {
-                    let addr = device.address();
+                    let device_address = device.address();
                     
-                    // Store to in-memory cache
-                    if let Some(uuid) = self.get_uuid_from_address(addr) {
-                        if let Ok(mut device_data) = self.device_data.lock() {
-                            device_data.insert(uuid.clone(), data.as_ref().clone_box());
-                        }
+                    // ✅ Clone the UUID to avoid borrowing issues
+                    let device_uuid = self.get_uuid_from_address(device_address)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    
+                    // ✅ Store in database if database service is available
+                    if let Err(e) = self.store_device_data_to_database(device_address, data.as_ref()).await {
+                        error!("Failed to store device data: {}", e);
                     }
                     
-                    // ✅ Store to database if enabled
-                    if let Err(e) = self.store_device_data_to_database(addr, data.as_ref()).await {
-                        error!("❌ Failed to store device {} data to database: {}", addr, e);
+                    // Store in memory for immediate access
+                    {
+                        let mut device_data = self.device_data.lock().unwrap();
+                        device_data.insert(device_uuid, data.as_ref().clone_box());
                     }
-                    
-                    info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
+                    all_data.push(data);
                 }
                 Err(e) => {
-                    error!("❌ Failed to read data from device {} ({}): {:?}", 
-                           device.address(), device.name(), e);
+                    error!("Failed to read from device {}: {}", device.address(), e);
+                }
+            }
+        }
+        
+        // Send to output formatters
+        if !all_data.is_empty() {
+            let formatted_data = self.formatter.format(&all_data.iter().map(|d| d.as_ref()).collect::<Vec<_>>());
+            
+            for sender in &self.senders {
+                if let Err(e) = sender.send(&formatted_data).await {
+                    error!("Failed to send data: {}", e);
                 }
             }
         }
@@ -211,12 +216,13 @@ impl DataService {
         Ok(())
     }
 
-    // Keep existing methods with UUID fixes
+    // Keep existing methods with fixes
     pub fn get_all_device_data(&self) -> Vec<(u8, String)> {
         if let Ok(device_data) = self.device_data.lock() {
-            self.config.device_addresses
+            self.devices
                 .iter()
-                .filter_map(|&addr| {
+                .filter_map(|device| {
+                    let addr = device.address();
                     self.get_uuid_from_address(addr)
                         .and_then(|uuid| device_data.get(uuid))
                         .map(|data| {
@@ -236,9 +242,10 @@ impl DataService {
 
     pub fn get_volatile_data(&self, parameter: &str) -> String {
         if let Ok(device_data) = self.device_data.lock() {
-            let values: Vec<String> = self.config.device_addresses
+            let values: Vec<String> = self.devices
                 .iter()
-                .filter_map(|&addr| {
+                .filter_map(|device| {
+                    let addr = device.address();
                     self.get_uuid_from_address(addr)
                         .and_then(|uuid| device_data.get(uuid))
                         .and_then(|data| data.get_parameter(parameter))
@@ -258,7 +265,6 @@ impl DataService {
         }
     }
 
-    // Keep existing raw data methods unchanged - they already use device address correctly
     pub async fn read_raw_device_data(&self, device_addr: u8, format: &str, output_file: Option<&String>) -> Result<(), ModbusError> {
         for device in &self.devices {
             if device.address() == device_addr {
@@ -369,7 +375,6 @@ impl DataService {
                 println!("🔧 Device: {} (Address: {}, UUID: {})", device_config.name, address, uuid);
                 println!("📍 Location: {}", device_config.location);
                 
-                // ✅ Use the device data's own formatting methods
                 println!("📊 Data:");
                 for (param, value) in data.get_all_parameters() {
                     println!("  {}: {}", param, value);
@@ -381,7 +386,7 @@ impl DataService {
         Ok(())
     }
 
-    // ✅ ADD missing setter methods for CLI
+    // ✅ CLI interface methods
     pub fn set_formatter(&mut self, formatter: Box<dyn DataFormatter>) {
         self.formatter = formatter;
     }
@@ -390,17 +395,14 @@ impl DataService {
         self.senders.push(sender);
     }
 
-    // ✅ ADD getter for database service (for CLI access)
     pub fn get_database_service(&self) -> Option<&DatabaseService> {
         self.database_service.as_ref()
     }
 
-    // Or if you need mutable access
     pub fn get_database_service_mut(&mut self) -> Option<&mut DatabaseService> {
         self.database_service.as_mut()
     }
 
-    // ✅ Fix the database stats methods
     pub async fn get_database_stats(&self) -> Result<Option<crate::storage::DatabaseStats>, ModbusError> {
         if let Some(db_service) = &self.database_service {
             Ok(Some(db_service.get_stats().await?))
@@ -420,7 +422,6 @@ impl DataService {
         }
     }
 
-    // ✅ Add flowmeter-specific query methods
     pub async fn query_flowmeter_data(&self, device_address: u8, limit: i64) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
             if let Some(uuid) = self.get_uuid_from_address(device_address) {

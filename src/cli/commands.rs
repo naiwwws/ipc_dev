@@ -130,5 +130,56 @@ pub async fn handle_subcommands(
         // Handle other db subcommands...
     }
 
+    // ✅ ADD: Handle flowmeter commands
+    if let Some(matches) = matches.subcommand_matches("flowmeter") {
+        if let Some(sub_matches) = matches.subcommand_matches("query") {
+            info!("📋 Executing flowmeter query command...");
+            
+            let device_address: u8 = sub_matches.get_one::<String>("device").unwrap().parse()
+                .map_err(|_| anyhow!("Invalid device address"))?;
+            let limit: i64 = sub_matches.get_one::<String>("limit").unwrap_or(&"10".to_string()).parse()
+                .map_err(|_| anyhow!("Invalid limit"))?;
+                
+            service.query_flowmeter_data(device_address, limit).await?;
+            return Ok(true);
+        }
+        
+        if let Some(_) = matches.subcommand_matches("stats") {
+            info!("📊 Executing flowmeter stats command...");
+            service.get_flowmeter_stats().await?;
+            return Ok(true);
+        }
+        
+        if let Some(sub_matches) = matches.subcommand_matches("recent") {
+            info!("📋 Executing flowmeter recent command...");
+            
+            let limit: i64 = sub_matches.get_one::<String>("limit").unwrap_or(&"20".to_string()).parse()
+                .map_err(|_| anyhow!("Invalid limit"))?;
+                
+            if let Some(db_service) = service.get_database_service() {
+                let readings = db_service.get_recent_flowmeter_readings(limit).await?;
+                
+                println!("📋 Recent flowmeter readings (last {}):", limit);
+                println!("{:<12} {:<12} {:<12} {:<12} {:<8} {:<25}", 
+                    "Mass Flow", "Temperature", "Density", "Vol Flow", "Error", "Timestamp");
+                println!("{}", "-".repeat(80));
+                
+                for reading in readings {
+                    println!("{:<12} {:<12} {:<12} {:<12} {:<8} {:<25}", 
+                        format!("{:.2}", reading.mass_flow_rate),
+                        format!("{:.1}", reading.temperature),
+                        format!("{:.4}", reading.density_flow),
+                        format!("{:.3}", reading.volume_flow_rate),
+                        reading.error_code,
+                        reading.timestamp.format("%H:%M:%S")
+                    );
+                }
+            } else {
+                println!("❌ Database service not available");
+            }
+            return Ok(true);
+        }
+    }
+
     Ok(false)
 }

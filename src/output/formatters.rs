@@ -9,6 +9,15 @@ pub trait DataFormatter: Send + Sync {
     fn format_multiple_devices(&self, devices_data: &[(u8, &dyn DeviceData)]) -> String;
     fn format_parameter_data(&self, parameter: &str, values: &HashMap<u8, String>) -> String;
     fn format_header(&self) -> String;
+    
+    // ✅ Add the missing format method
+    fn format(&self, data: &[&dyn DeviceData]) -> String {
+        // Convert to the format expected by format_multiple_devices
+        let devices_data: Vec<(u8, &dyn DeviceData)> = data.iter()
+            .map(|device_data| (device_data.device_address(), *device_data))
+            .collect();
+        self.format_multiple_devices(&devices_data)
+    }
 }
 
 pub struct ConsoleFormatter;
