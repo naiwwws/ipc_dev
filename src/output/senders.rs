@@ -135,50 +135,6 @@ impl DataSender for NetworkSender {
     }
 }
 
-pub struct DatabaseSender {
-    connection_string: String,
-}
-
-impl DatabaseSender {
-    pub fn new(connection_string: String) -> Self {
-        Self { connection_string }
-    }
-}
-
-#[async_trait]
-impl DataSender for DatabaseSender {
-    async fn send(&self, data: &str) -> Result<(), ModbusError> {
-        // PLACEHOLDER: Database insertion
-        warn!("🗄️  [DATABASE PLACEHOLDER] Inserting to database");
-        info!("🗄️  Connection: {}", self.connection_string);
-        info!("🗄️  Data to insert: {}", data);
-        
-        // TODO: Implement actual database insertion
-        /*
-        let pool = sqlx::PgPool::connect(&self.connection_string).await
-            .map_err(|e| ModbusError::CommunicationError(format!("DB connection error: {}", e)))?;
-        
-        sqlx::query("INSERT INTO device_data (data, timestamp) VALUES ($1, NOW())")
-            .bind(data)
-            .execute(&pool)
-            .await
-            .map_err(|e| ModbusError::CommunicationError(format!("DB insert error: {}", e)))?;
-        
-        info!("🗄️  Data inserted successfully");
-        */
-        
-        Ok(())
-    }
-    
-    fn sender_type(&self) -> &str {
-        "database"
-    }
-    
-    fn destination(&self) -> &str {
-        &self.connection_string
-    }
-}
-
 pub struct MqttSender {
     broker_url: String,
     topic: String,

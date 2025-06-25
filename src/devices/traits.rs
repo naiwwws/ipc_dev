@@ -23,7 +23,6 @@ pub trait DeviceData: Send + Sync {
     fn get_parameter(&self, name: &str) -> Option<String>;
     fn get_all_parameters(&self) -> Vec<(String, String)>;
     fn device_address(&self) -> u8;
-
     fn timestamp(&self) -> chrono::DateTime<chrono::Utc>;
     fn device_type(&self) -> String {
         "unknown".to_string()
@@ -34,4 +33,7 @@ pub trait DeviceData: Send + Sync {
     fn device_location(&self) -> String {
         "Unknown".to_string()
     }
+    
+    // Add clone method for storage
+    fn clone_box(&self) -> Box<dyn DeviceData>;
 }

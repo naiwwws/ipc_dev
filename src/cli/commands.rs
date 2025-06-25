@@ -3,7 +3,7 @@ use log::info;
 
 use crate::services::DataService;
 use crate::devices::flowmeter::FlowmeterDevice;
-use crate::output::{JsonFormatter, CsvFormatter, FileSender, NetworkSender, DatabaseSender, MqttSender};
+use crate::output::{JsonFormatter, CsvFormatter, FileSender, MqttSender};
 use crate::output::raw_sender::{RawDataSender, RawDataFormat};
 
 pub async fn handle_subcommands(
@@ -77,13 +77,15 @@ pub async fn handle_subcommands(
         let device_address: u8 = matches.get_one::<String>("device").unwrap().parse()
             .map_err(|_| "Invalid device address")?;
         
-        let format = matches.get_one::<String>("format").unwrap_or(&"hex".to_string());
+        // ✅ Fix: Create a binding for the default value
+        let default_format = "hex".to_string();
+        let format = matches.get_one::<String>("format").unwrap_or(&default_format);
         
-        // if let Some(output_file) = matches.get_one::<String>("output") {
-        //     service.get_raw_data_with_file(device_address, format, output_file).await?; // Use correct method name
-        // } else {
-        //     service.get_raw_device_data(device_address, format).await?; // Use correct method name
-        // }
+        if let Some(output_file) = matches.get_one::<String>("output") {
+            service.read_raw_device_data(device_address, format, Some(output_file)).await?;
+        } else {
+            service.read_raw_device_data(device_address, format, None).await?;
+        }
         
         return Ok(true);
     }

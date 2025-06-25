@@ -193,7 +193,7 @@ impl SqliteManager {
     }
 
     async fn insert_readings_chunk(&self, readings: &[DeviceReading]) -> Result<usize, ModbusError> {
-        let mut tx = self.pool.begin().await.map_err(|e| {
+        let mut tx: sqlx::Transaction<'static, Sqlite> = self.pool.begin().await.map_err(|e| {
             ModbusError::CommunicationError(format!("Failed to start transaction: {}", e))
         })?;
 

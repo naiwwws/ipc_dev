@@ -59,9 +59,8 @@ impl FlowmeterDevice {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowmeterData {
-    pub device_address: u8,
+    pub device_address: u8, // ✅ Ensure this field exists
     pub timestamp: DateTime<Utc>,
-    pub error_code: u32,
     pub mass_flow_rate: f32,
     pub density_flow: f32,
     pub temperature: f32,
@@ -70,6 +69,7 @@ pub struct FlowmeterData {
     pub volume_total: f32,
     pub mass_inventory: f32,
     pub volume_inventory: f32,
+    pub error_code: u16,
 }
 
 impl Default for FlowmeterData {
@@ -77,7 +77,6 @@ impl Default for FlowmeterData {
         Self {
             device_address: 0,
             timestamp: Utc::now(),
-            error_code: 0,
             mass_flow_rate: 0.0,
             density_flow: 0.0,
             temperature: 0.0,
@@ -86,6 +85,7 @@ impl Default for FlowmeterData {
             volume_total: 0.0,
             mass_inventory: 0.0,
             volume_inventory: 0.0,
+            error_code: 0,
         }
     }
 }
@@ -156,7 +156,6 @@ impl Device for FlowmeterDevice {
         let flowmeter_data = FlowmeterData {
             device_address: self.address,
             timestamp: Utc::now(),
-            error_code,
             mass_flow_rate: f32::from_bits(mass_flow_rate_raw),
             density_flow: f32::from_bits(density_flow_raw),
             temperature: f32::from_bits(temperature_raw),
@@ -165,6 +164,7 @@ impl Device for FlowmeterDevice {
             volume_total: f32::from_bits(volume_total_raw),
             mass_inventory: f32::from_bits(mass_inventory_raw),
             volume_inventory: f32::from_bits(volume_inventory_raw),
+            error_code: (error_code & 0xFFFF) as u16, // Ensure error_code is u16
         };
         
         Ok(Box::new(flowmeter_data))
@@ -174,6 +174,15 @@ impl Device for FlowmeterDevice {
 impl DeviceData for FlowmeterData {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+    
+    // ✅ Add the missing device_address method
+    fn device_address(&self) -> u8 {
+        self.device_address
+    }
+    
+    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
+        self.timestamp
     }
     
     fn to_json(&self) -> Value {
@@ -197,7 +206,6 @@ impl DeviceData for FlowmeterData {
     
     fn get_all_parameters(&self) -> Vec<(String, String)> {
         vec![
-            ("ErrorCode".to_string(), self.error_code.to_string()),
             ("MassFlowRate".to_string(), format!("{:.2} kg/h", self.mass_flow_rate)),
             ("DensityFlow".to_string(), format!("{:.4} kg/L", self.density_flow)),
             ("Temperature".to_string(), format!("{:.1}°C", self.temperature)),
@@ -206,19 +214,25 @@ impl DeviceData for FlowmeterData {
             ("VolumeTotal".to_string(), format!("{:.3} L", self.volume_total)),
             ("MassInventory".to_string(), format!("{:.2} kg", self.mass_inventory)),
             ("VolumeInventory".to_string(), format!("{:.3} L", self.volume_inventory)),
+            ("ErrorCode".to_string(), self.error_code.to_string()),
         ]
-    }
-    
-    fn device_address(&self) -> u8 {
-        self.device_address
-    }
-    
-    fn timestamp(&self) -> chrono::DateTime<chrono::Utc> {
-        self.timestamp
     }
     
     fn device_type(&self) -> String {
         "flowmeter".to_string()
+    }
+    
+    fn device_name(&self) -> String {
+        format!("Device {}", self.device_address)
+    }
+    
+    fn device_location(&self) -> String {
+        "Unknown".to_string()
+    }
+    
+    // ✅ Add clone method for storage
+    fn clone_box(&self) -> Box<dyn DeviceData> {
+        Box::new(self.clone())
     }
 }
 
@@ -306,7 +320,6 @@ impl FlowmeterRawPayload {
         FlowmeterData {
             device_address: self.device_address,
             timestamp: self.timestamp,
-            error_code: self.error_code_raw,
             mass_flow_rate: f32::from_bits(self.mass_flow_rate_raw),
             density_flow: f32::from_bits(self.density_flow_raw),
             temperature: f32::from_bits(self.temperature_raw),
@@ -315,6 +328,7 @@ impl FlowmeterRawPayload {
             volume_total: f32::from_bits(self.volume_total_raw),
             mass_inventory: f32::from_bits(self.mass_inventory_raw),
             volume_inventory: f32::from_bits(self.volume_inventory_raw),
+            error_code: (self.error_code_raw & 0xFFFF) as u16, // Ensure error_code is u16
         }
     }
 

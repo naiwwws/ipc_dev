@@ -10,6 +10,7 @@ use crate::output::{DataFormatter, DataSender, ConsoleFormatter, ConsoleSender};
 use crate::utils::error::ModbusError;
 use crate::devices::flowmeter::{FlowmeterRawPayload};
 use crate::output::raw_sender::{RawDataSender, RawDataFormat};
+use crate::services::DatabaseService; // Add this import
 
 pub struct DataService {
     config: Config,
@@ -19,6 +20,7 @@ pub struct DataService {
     modbus_client: Arc<ModbusClient>,
     formatter: Box<dyn DataFormatter>,
     senders: Vec<Box<dyn DataSender>>,
+    database_service: Option<DatabaseService>, // Add this field
 }
 
 impl DataService {
@@ -57,6 +59,33 @@ impl DataService {
             }
         }
 
+        // Initialize database service if enabled
+        let database_service = if config.output.database_output
+            .as_ref()
+            .map(|db| db.enabled)
+            .unwrap_or(false) 
+        {
+            info!("🗄️  Initializing database service...");
+            match DatabaseService::new(config.clone()).await {
+                Ok(mut db_service) => {
+                    if let Err(e) = db_service.start().await {
+                        error!("❌ Failed to start database service: {}", e);
+                        None
+                    } else {
+                        info!("✅ Database service initialized successfully");
+                        Some(db_service)
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Failed to initialize database service: {}", e);
+                    None
+                }
+            }
+        } else {
+            info!("📝 Database storage disabled");
+            None
+        };
+
         // Default output configuration
         let formatter: Box<dyn DataFormatter> = Box::new(ConsoleFormatter);
         let mut senders: Vec<Box<dyn DataSender>> = Vec::new();
@@ -71,6 +100,7 @@ impl DataService {
             modbus_client: Arc::new(modbus_client),
             formatter,
             senders,
+            database_service, // Initialize the field
         })
     }
 
@@ -310,12 +340,18 @@ impl DataService {
     // Keep existing methods with UUID fixes
     pub async fn run(&self, debug_output: bool) -> Result<(), ModbusError> {
         if debug_output {
-            info!("🚀 Starting continuous monitoring with automatic output");
+            info!("🚀 Starting continuous monitoring with automatic output and database storage");
             info!("📤 Output destinations: {}", 
                   self.senders.iter()
                       .map(|s| format!("{}({})", s.sender_type(), s.destination()))
                       .collect::<Vec<_>>()
                       .join(", "));
+            
+            if self.database_service.is_some() {
+                info!("💾 Database storage: ENABLED");
+            } else {
+                info!("📝 Database storage: DISABLED");
+            }
         }
 
         let mut interval = interval(Duration::from_secs(self.config.update_interval_seconds));
@@ -331,14 +367,19 @@ impl DataService {
                     Ok(data) => {
                         let addr = device.address();
                         
-                        // Get UUID from address for storage
+                        // Store to in-memory cache
                         if let Some(uuid) = self.get_uuid_from_address(addr) {
                             if let Ok(mut device_data) = self.device_data.lock() {
-                                device_data.insert(uuid.clone(), data);
+                                device_data.insert(uuid.clone(), data.as_ref().clone_box());
                             }
                         }
                         
-                        info!("✅ Successfully read data from device {} ({})", addr, device.name());
+                        // ✅ Store to database if enabled
+                        if let Err(e) = self.store_device_data_to_database(addr, data.as_ref()).await {
+                            error!("❌ Failed to store device {} data to database: {}", addr, e);
+                        }
+                        
+                        info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
                         success_count += 1;
                     }
                     Err(e) => {
@@ -356,13 +397,13 @@ impl DataService {
                 if let Err(e) = self.print_all_device_data().await {
                     error!("❌ Failed to broadcast device data: {:?}", e);
                 } else {
-                    // Add separator for readability
                     println!("{}", "─".repeat(80));
                 }
             }
         }
     }
 
+    // Update single read method to store data
     pub async fn read_all_devices_once(&self) -> Result<(), ModbusError> {
         info!("📖 Reading data from all devices once...");
         
@@ -371,14 +412,19 @@ impl DataService {
                 Ok(data) => {
                     let addr = device.address();
                     
-                    // Get UUID from address for storage
+                    // Store to in-memory cache
                     if let Some(uuid) = self.get_uuid_from_address(addr) {
                         if let Ok(mut device_data) = self.device_data.lock() {
-                            device_data.insert(uuid.clone(), data);
+                            device_data.insert(uuid.clone(), data.as_ref().clone_box());
                         }
                     }
                     
-                    info!("✅ Successfully read data from device {} ({})", addr, device.name());
+                    // ✅ Store to database if enabled
+                    if let Err(e) = self.store_device_data_to_database(addr, data.as_ref()).await {
+                        error!("❌ Failed to store device {} data to database: {}", addr, e);
+                    }
+                    
+                    info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
                 }
                 Err(e) => {
                     error!("❌ Failed to read data from device {} ({}): {:?}", 
@@ -534,5 +580,103 @@ impl DataService {
         }
         
         Err(ModbusError::DeviceNotFound(format!("Device {} not found", device_addr)))
+    }
+
+    // Add method to store device data
+    async fn store_device_data_to_database(
+        &self,
+        device_address: u8,
+        device_data: &dyn DeviceData,
+    ) -> Result<(), ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            if let Some(uuid) = self.get_uuid_from_address(device_address) {
+                if let Some(device_config) = self.config.get_device_by_uuid(uuid) {
+                    db_service.store_device_data(
+                        uuid,
+                        device_address,
+                        &device_config.device_type,
+                        &device_config.name,
+                        &device_config.location,
+                        device_data,
+                    ).await?;
+                    
+                    info!("💾 Stored data for device {} to database", device_address);
+                } else {
+                    warn!("⚠️  Device config not found for UUID: {}", uuid);
+                }
+            } else {
+                warn!("⚠️  UUID not found for device address: {}", device_address);
+            }
+        }
+        Ok(())
+    }
+
+    // Use existing DatabaseService methods instead of duplicating
+    pub async fn get_database_stats(&self) -> Result<Option<crate::storage::DatabaseStats>, ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            Ok(Some(db_service.get_stats().await?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn check_database_health(&self) -> Result<Option<bool>, ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            match db_service.get_stats().await {
+                Ok(_) => Ok(Some(true)),
+                Err(_) => Ok(Some(false)),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn query_device_data(&self, device_address: u8, limit: i64) -> Result<(), ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            if let Some(uuid) = self.get_uuid_from_address(device_address) {
+                let readings = db_service.get_device_readings(uuid, None, Some(limit)).await?;
+                
+                println!("📋 Recent readings for device {}:", device_address);
+                println!("{:<20} {:<15} {:<10} {:<25}", "Parameter", "Value", "Unit", "Timestamp");
+                println!("{}", "-".repeat(70));
+                
+                for reading in readings {
+                    println!("{:<20} {:<15} {:<10} {:<25}", 
+                        reading.parameter_name,
+                        reading.parameter_value,
+                        reading.parameter_unit.unwrap_or_else(|| "".to_string()),
+                        reading.timestamp.format("%Y-%m-%d %H:%M:%S")
+                    );
+                }
+            } else {
+                println!("❌ Device address {} not found", device_address);
+            }
+        } else {
+            println!("❌ Database service not enabled");
+        }
+        Ok(())
+    }
+
+    pub async fn query_all_data(&self, limit: i64) -> Result<(), ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            let readings = db_service.get_recent_readings(limit).await?;
+            
+            println!("📋 Recent readings (last {}):", limit);
+            println!("{:<8} {:<20} {:<15} {:<10} {:<25}", "Device", "Parameter", "Value", "Unit", "Timestamp");
+            println!("{}", "-".repeat(80));
+            
+            for reading in readings {
+                println!("{:<8} {:<20} {:<15} {:<10} {:<25}", 
+                    reading.device_address,
+                    reading.parameter_name,
+                    reading.parameter_value,
+                    reading.parameter_unit.unwrap_or_else(|| "".to_string()),
+                    reading.timestamp.format("%Y-%m-%d %H:%M:%S")
+                );
+            }
+        } else {
+            println!("❌ Database service not enabled");
+        }
+        Ok(())
     }
 }
