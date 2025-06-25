@@ -142,6 +142,17 @@ impl Default for SqliteConfig {
         }
     }
 }
+impl Default for FileOutputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "./data/sensor_data.json".to_string(),
+            rotate: true,
+            max_file_size_mb: 100,
+            compression: false,
+        }
+    }
+}
 
 impl Default for DatabaseOutputConfig {
     fn default() -> Self {

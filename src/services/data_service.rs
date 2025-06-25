@@ -59,7 +59,7 @@ impl DataService {
             }
         }
 
-        // Initialize database service if enabled
+        // ✅ Add database service initialization
         let database_service = if config.output.database_output
             .as_ref()
             .map(|db| db.enabled)
@@ -82,7 +82,7 @@ impl DataService {
                 }
             }
         } else {
-            info!("📝 Database storage disabled");
+            info!("📝 Database storage disabled in configuration");
             None
         };
 
@@ -100,7 +100,7 @@ impl DataService {
             modbus_client: Arc::new(modbus_client),
             formatter,
             senders,
-            database_service, // Initialize the field
+            database_service, // ✅ Add this field
         })
     }
 
