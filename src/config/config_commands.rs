@@ -130,6 +130,18 @@ async fn handle_show_command(
         println!("───────────────────────────────────────────────────────────");
     }
 
+    // ✅ ADD: Socket Server Information
+    println!("\n🔌 Socket Server Configuration:");
+    println!("═══════════════════════════════════════");
+    let socket_status = if config.socket_server.enabled { "✅ ENABLED" } else { "❌ DISABLED" };
+    println!("   📡 Status: {}", socket_status);
+    println!("   🔌 Port: {}", config.socket_server.port);
+    if let Some(max_clients) = config.socket_server.max_clients {
+        println!("   👥 Max Clients: {}", max_clients);
+    } else {
+        println!("   👥 Max Clients: Unlimited");
+    }
+    
     Ok(true)
 }
 
@@ -284,6 +296,8 @@ async fn handle_set_command(
     } else if target.starts_with("output:") {
         let output_type = target.strip_prefix("output:").unwrap().to_string();
         ConfigTarget::Output { output_type }
+    } else if target == "socket_server" {  // ✅ ADD: Handle socket_server target
+        ConfigTarget::SocketServer
     } else {
         return Err(format!("Unknown target: {}", target).into());
     };
@@ -295,7 +309,8 @@ async fn handle_set_command(
         ConfigTarget::Site => true,
         ConfigTarget::System => true,
         ConfigTarget::Device { .. } => true,
-        ConfigTarget::Output { .. } => true, // ✅ Make output commands immediate
+        ConfigTarget::Output { .. } => true,
+        ConfigTarget::SocketServer => true,  // ✅ ADD: Make socket server changes immediate
     };
 
     let command = ConfigurationCommand {
@@ -308,7 +323,6 @@ async fn handle_set_command(
         apply_immediately,
     };
 
-    // ✅ Execute the command through DynamicConfigManager
     let response = config_manager.execute_command(command).await;
     
     if response.success {
@@ -317,7 +331,7 @@ async fn handle_set_command(
             println!("⚠️  Service restart required to apply changes");
         }
         
-        // ✅ Save to TOML file after successful update
+        // Save to TOML file after successful update
         if let Err(e) = save_config_to_file(config_manager, "setup/default.toml").await {
             println!("⚠️  Warning: Failed to save to TOML file: {}", e);
             println!("💡 Changes are active but won't persist after restart");
@@ -609,7 +623,7 @@ async fn handle_reset_command(
     Ok(true)
 }
 
-// Add this helper function after the existing functions
+// ✅ ADD: Helper function to save config to file
 async fn save_config_to_file(
     config_manager: &DynamicConfigManager,
     file_path: &str,
@@ -617,7 +631,7 @@ async fn save_config_to_file(
     // Get current config from manager
     let config = config_manager.get_current_config().await;
     
-    // Use the save_to_file method from Config (which already exists in settings.rs)
+    // Use the save_to_file method from Config
     config.save_to_file(file_path)?;
     
     Ok(())

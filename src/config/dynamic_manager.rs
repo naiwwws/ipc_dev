@@ -53,11 +53,12 @@ impl fmt::Display for ConfigCommandType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConfigTarget {
     Serial,
-    Device { address: u8 },
     Monitoring,
-    Output { output_type: String },
     Site,
     System,
+    Device { address: u8 },
+    Output { output_type: String },
+    SocketServer,  // ✅ ADD: Socket server target
 }
 
 // Implement Display for ConfigTarget
@@ -70,6 +71,7 @@ impl fmt::Display for ConfigTarget {
             ConfigTarget::Output { output_type } => write!(f, "Output[{}]", output_type),
             ConfigTarget::Site => write!(f, "Site"),
             ConfigTarget::System => write!(f, "System"),
+            ConfigTarget::SocketServer => write!(f, "SocketServer"),
         }
     }
 }
@@ -437,6 +439,51 @@ impl DynamicConfigManager {
                         }
                     }
                     _ => return Err(ModbusError::InvalidData(format!("Unknown output type: {}", output_type))),
+                }
+            }
+            //  Add support for SocketServer target
+            ConfigTarget::SocketServer => {
+                for (key, value) in &command.parameters {
+                    match key.as_str() {
+                        "enabled" => {
+                            let enabled = value.parse::<bool>().map_err(|_| 
+                                ModbusError::InvalidData("Invalid boolean value".to_string()))?;
+                            
+                            let old_value = config.socket_server.enabled.to_string();
+                            config.socket_server.enabled = enabled;
+                            
+                            // ✅ ADD: Signal service restart requirement for socket server changes
+                            return Ok((true, format!("Socket server enabled set to: {}", enabled), 
+                                     Some(old_value), Some(value.clone()), true)); // Changed to true for restart
+                        }
+                        "port" => {
+                            let port = value.parse::<u16>().map_err(|_| 
+                                ModbusError::InvalidData("Invalid port number".to_string()))?;
+                            
+                            // ✅ ADD: Port validation
+                            if port < 1024 {
+                                return Ok((false, "Port must be >= 1024 for non-privileged operation".to_string(),
+                                         None, None, false));
+                            }
+                            
+                            let old_value = config.socket_server.port.to_string();
+                            config.socket_server.port = port;
+                            return Ok((true, format!("Socket server port set to: {}", port), 
+                                     Some(old_value), Some(value.clone()), true)); // Requires restart
+                        }
+                        "max_clients" => {
+                            let max_clients = value.parse::<usize>().map_err(|_| 
+                                ModbusError::InvalidData("Invalid max_clients value".to_string()))?;
+                            
+                            let old_value = config.socket_server.max_clients
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "None".to_string());
+                            config.socket_server.max_clients = Some(max_clients);
+                            return Ok((true, format!("Socket server max_clients set to: {}", max_clients), 
+                                     Some(old_value), Some(value.clone()), false));
+                        }
+                        _ => return Err(ModbusError::InvalidData(format!("Unknown socket server parameter: {}", key))),
+                    }
                 }
             }
             // Keep the old catch-all for backward compatibility but make it more specific
