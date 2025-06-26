@@ -106,7 +106,7 @@ async fn handle_show_command(
     println!("\n📡 Devices ({}):", config.devices.len());
     println!("═══════════════════════════════════════════════════════════");
     for device in &config.devices {
-        let status = if device.enabled { "✅" } else { "❌" };
+        let status = if device.enabled { "" } else { "❌" };
         println!("🏷️  Name: {}", device.name);
         println!("🆔 Device UUID: {}", device.uuid);
         println!("📡 Address: {} | Type: {} | Status: {}", 
@@ -159,7 +159,7 @@ async fn handle_ipc_command(
         let response = config_manager.execute_command(command).await;
         
         if response.success {
-            println!("✅ IPC name updated to: {}", name);
+            println!(" IPC name updated to: {}", name);
         } else {
             println!("❌ Failed to update IPC name: {}", response.message);
         }
@@ -195,7 +195,7 @@ async fn handle_ipc_command(
         let response = config_manager.execute_command(command).await;
         
         if response.success {
-            println!("✅ New IPC UUID generated");
+            println!(" New IPC UUID generated");
             if response.requires_restart {
                 println!("⚠️  Service restart required to apply new UUID");
             }
@@ -239,7 +239,7 @@ async fn handle_set_interval_command(
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ Polling interval updated to {} seconds", interval);
+        println!(" Polling interval updated to {} seconds", interval);
         if response.requires_restart {
             println!("⚠️  Service restart required to apply new polling interval");
         } else {
@@ -261,11 +261,9 @@ async fn handle_set_command(
     let key = matches.get_one::<String>("key").unwrap();
     let value = matches.get_one::<String>("value").unwrap();
     
-    // Fix the temporary value issue
     let default_operator = "CLI".to_string();
     let operator = matches.get_one::<String>("operator").unwrap_or(&default_operator);
 
-    // Create the configuration command
     let mut parameters = HashMap::new();
     parameters.insert(key.clone(), value.clone());
 
@@ -297,7 +295,7 @@ async fn handle_set_command(
         ConfigTarget::Site => true,
         ConfigTarget::System => true,
         ConfigTarget::Device { .. } => true,
-        ConfigTarget::Output { .. } => false,
+        ConfigTarget::Output { .. } => true, // ✅ Make output commands immediate
     };
 
     let command = ConfigurationCommand {
@@ -310,7 +308,7 @@ async fn handle_set_command(
         apply_immediately,
     };
 
-    // ✅ Fix: Remove type annotation and ? operator
+    // ✅ Execute the command through DynamicConfigManager
     let response = config_manager.execute_command(command).await;
     
     if response.success {
@@ -318,104 +316,16 @@ async fn handle_set_command(
         if response.requires_restart {
             println!("⚠️  Service restart required to apply changes");
         }
+        
+        // ✅ Save to TOML file after successful update
+        if let Err(e) = save_config_to_file(config_manager, "setup/default.toml").await {
+            println!("⚠️  Warning: Failed to save to TOML file: {}", e);
+            println!("💡 Changes are active but won't persist after restart");
+        } else {
+            println!("💾 Configuration saved to setup/default.toml");
+        }
     } else {
         println!("❌ Failed to update configuration: {}", response.message);
-    }
-
-    // Handle database output configuration using the config manager
-    if target.starts_with("output:database") {
-        let parts: Vec<&str> = target.split(':').collect();
-        if parts.len() >= 3 {
-            let config_key = parts[2];
-            
-            // Get current config from the manager
-            let mut config = config_manager.get_current_config().await;
-            
-            match config_key {
-                "enabled" => {
-                    let enabled = value.parse::<bool>()
-                        .map_err(|_| "Invalid boolean value for enabled")?;
-                    
-                    if config.output.database_output.is_none() {
-                        config.output.database_output = Some(DatabaseOutputConfig::default());
-                    }
-                    config.output.database_output.as_mut().unwrap().enabled = enabled;
-                    
-                    let save_command = ConfigurationCommand {
-                        command_id: Uuid::new_v4().to_string(),
-                        command_type: ConfigCommandType::Set,
-                        target: ConfigTarget::Output { output_type: "database".to_string() },
-                        parameters: {
-                            let mut params = HashMap::new();
-                            params.insert("enabled".to_string(), enabled.to_string());
-                            params
-                        },
-                        timestamp: Utc::now(),
-                        operator: operator.clone(),
-                        apply_immediately: true,
-                    };
-                    // ✅ Fix: Remove ? operator here too
-                    let _save_response = config_manager.execute_command(save_command).await;
-                    println!("✅ Database output enabled: {}", enabled);
-                    return Ok(true);
-                }
-                "database_path" => {
-                    if config.output.database_output.is_none() {
-                        config.output.database_output = Some(DatabaseOutputConfig::default());
-                    }
-                    config.output.database_output.as_mut().unwrap()
-                        .sqlite_config.database_path = value.clone();
-                    
-                    let save_command = ConfigurationCommand {
-                        command_id: Uuid::new_v4().to_string(),
-                        command_type: ConfigCommandType::Set,
-                        target: ConfigTarget::Output { output_type: "database".to_string() },
-                        parameters: {
-                            let mut params = HashMap::new();
-                            params.insert("database_path".to_string(), value.clone());
-                            params
-                        },
-                        timestamp: Utc::now(),
-                        operator: operator.clone(),
-                        apply_immediately: true,
-                    };
-                    // ✅ Fix: Remove ? operator here too
-                    let _save_response = config_manager.execute_command(save_command).await;
-                    println!("✅ Database path set to: {}", value);
-                    return Ok(true);
-                }
-                "batch_size" => {
-                    let batch_size = value.parse::<usize>()
-                        .map_err(|_| "Invalid batch size")?;
-                    
-                    if config.output.database_output.is_none() {
-                        config.output.database_output = Some(DatabaseOutputConfig::default());
-                    }
-                    config.output.database_output.as_mut().unwrap().batch_size = batch_size;
-                    
-                    let save_command = ConfigurationCommand {
-                        command_id: Uuid::new_v4().to_string(),
-                        command_type: ConfigCommandType::Set,
-                        target: ConfigTarget::Output { output_type: "database".to_string() },
-                        parameters: {
-                            let mut params = HashMap::new();
-                            params.insert("batch_size".to_string(), batch_size.to_string());
-                            params
-                        },
-                        timestamp: Utc::now(),
-                        operator: operator.clone(),
-                        apply_immediately: true,
-                    };
-                    // ✅ Fix: Remove ? operator here too
-                    let _save_response = config_manager.execute_command(save_command).await;
-                    println!("✅ Database batch size set to: {}", batch_size);
-                    return Ok(true);
-                }
-                _ => {
-                    return Err(format!("Unknown database config key: {}", config_key).into());
-                }
-            }
-        }
     }
 
     Ok(true)
@@ -463,7 +373,7 @@ async fn handle_add_command(
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ {}", response.message);
+        println!(" {}", response.message);
         if response.requires_restart {
             println!("⚠️  Service restart required to activate new device");
         }
@@ -498,7 +408,7 @@ async fn handle_enable_command(
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ Device {} enabled", address);
+        println!(" Device {} enabled", address);
     } else {
         println!("❌ Failed to enable device {}: {}", address, response.message);
     }
@@ -530,7 +440,7 @@ async fn handle_disable_command(
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ Device {} disabled", address);
+        println!(" Device {} disabled", address);
     } else {
         println!("❌ Failed to disable device {}: {}", address, response.message);
     }
@@ -572,7 +482,7 @@ async fn handle_remove_command(
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ {}", response.message);
+        println!(" {}", response.message);
         if response.requires_restart {
             println!("⚠️  Service restart required to deactivate removed device");
         }
@@ -608,7 +518,7 @@ async fn handle_backup_command(
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ {}", response.message);
+        println!(" {}", response.message);
     } else {
         println!("❌ Failed to create backup: {}", response.message);
     }
@@ -650,7 +560,7 @@ async fn handle_restore_command(
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ {}", response.message);
+        println!(" {}", response.message);
         if response.requires_restart {
             println!("⚠️  Service restart required to apply restored configuration");
         }
@@ -688,7 +598,7 @@ async fn handle_reset_command(
     let response = config_manager.execute_command(command).await;
     
     if response.success {
-        println!("✅ {}", response.message);
+        println!(" {}", response.message);
         if response.requires_restart {
             println!("⚠️  Service restart required to apply reset configuration");
         }
@@ -697,4 +607,18 @@ async fn handle_reset_command(
     }
 
     Ok(true)
+}
+
+// Add this helper function after the existing functions
+async fn save_config_to_file(
+    config_manager: &DynamicConfigManager,
+    file_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Get current config from manager
+    let config = config_manager.get_current_config().await;
+    
+    // Use the save_to_file method from Config (which already exists in settings.rs)
+    config.save_to_file(file_path)?;
+    
+    Ok(())
 }

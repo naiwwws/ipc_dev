@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-// ✅ CORRECTED: Unified Flowmeter Reading Structure
+//  CORRECTED: Unified Flowmeter Reading Structure
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FlowmeterReading {
     pub id: Option<i64>,
@@ -67,7 +67,7 @@ pub struct SystemMetrics {
     pub cpu_usage_percent: f64,
 }
 
-// ✅ CORRECTED: Statistics for flowmeter data
+//  CORRECTED: Statistics for flowmeter data
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FlowmeterStats {
     pub total_readings: i64,
@@ -80,7 +80,7 @@ pub struct FlowmeterStats {
     pub earliest_reading: Option<DateTime<Utc>>,
 }
 
-// ✅ CORRECTED: Constructor for FlowmeterReading
+//  CORRECTED: Constructor for FlowmeterReading
 impl FlowmeterReading {
     pub fn from_flowmeter_data(
         device_uuid: String,

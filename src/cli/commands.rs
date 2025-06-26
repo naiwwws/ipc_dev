@@ -1,9 +1,8 @@
 use clap::ArgMatches;
 use log::info;
-use anyhow::{Result, anyhow}; // ✅ Add anyhow macro import
+use anyhow::{Result, anyhow}; //  Add anyhow macro import
 
 use crate::services::DataService;
-use crate::devices::flowmeter::FlowmeterDevice;
 use crate::output::{JsonFormatter, CsvFormatter, FileSender, MqttSender};
 use crate::output::raw_sender::{RawDataSender, RawDataFormat};
 
@@ -66,7 +65,7 @@ pub async fn handle_subcommands(
         
         info!("🔄 Executing reset accumulation for device {}...", device_addr);
         service.reset_accumulation(device_addr).await?;
-        println!("✅ Reset accumulation command sent to device {}", device_addr);
+        println!(" Reset accumulation command sent to device {}", device_addr);
         
         return Ok(true);
     }
@@ -76,7 +75,7 @@ pub async fn handle_subcommands(
         info!("🔍 Executing getrawdata command...");
         
         let device_address: u8 = matches.get_one::<String>("device").unwrap().parse()
-            .map_err(|_| anyhow!("Invalid device address"))?; // ✅ Fix this line
+            .map_err(|_| anyhow!("Invalid device address"))?; //  Fix this line
         
         let default_format = "hex".to_string();
         let format = matches.get_one::<String>("format").unwrap_or(&default_format);
@@ -95,7 +94,7 @@ pub async fn handle_subcommands(
         info!("🔍 Executing compare-raw command...");
         
         let device_address: u8 = matches.get_one::<String>("device").unwrap().parse()
-            .map_err(|_| anyhow!("Invalid device address"))?; // ✅ Fix this line
+            .map_err(|_| anyhow!("Invalid device address"))?; //  Fix this line
         
         service.compare_raw_vs_processed(device_address).await?;
         
@@ -110,7 +109,7 @@ pub async fn handle_subcommands(
             let limit: i64 = sub_matches.get_one::<String>("limit")
                 .unwrap_or(&"10".to_string())
                 .parse()
-                .map_err(|_| anyhow!("Invalid limit"))?; // ✅ Fix this line
+                .map_err(|_| anyhow!("Invalid limit"))?; //  Fix this line
                 
             if let Some(addr) = device_address {
                 service.query_flowmeter_data(addr, limit).await?;
@@ -130,7 +129,7 @@ pub async fn handle_subcommands(
         // Handle other db subcommands...
     }
 
-    // ✅ ADD: Handle flowmeter commands
+    //  ADD: Handle flowmeter commands
     if let Some(matches) = matches.subcommand_matches("flowmeter") {
         if let Some(sub_matches) = matches.subcommand_matches("query") {
             info!("📋 Executing flowmeter query command...");

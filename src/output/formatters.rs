@@ -10,7 +10,7 @@ pub trait DataFormatter: Send + Sync {
     fn format_parameter_data(&self, parameter: &str, values: &HashMap<u8, String>) -> String;
     fn format_header(&self) -> String;
     
-    // ✅ Add the missing format method
+    //  Add the missing format method
     fn format(&self, data: &[&dyn DeviceData]) -> String {
         // Convert to the format expected by format_multiple_devices
         let devices_data: Vec<(u8, &dyn DeviceData)> = data.iter()

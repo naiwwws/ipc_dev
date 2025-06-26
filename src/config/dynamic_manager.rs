@@ -111,7 +111,7 @@ impl DynamicConfigManager {
             Config::default()
         };
 
-        // ✅ Increase channel capacity to prevent closure
+        //  Increase channel capacity to prevent closure
         let (change_sender, _receiver) = broadcast::channel(1000);
 
         // Create shared config
@@ -127,16 +127,16 @@ impl DynamicConfigManager {
         })
     }
 
+    //  ADD: Method to get current config for saving
     pub async fn get_current_config(&self) -> Config {
-        let config = self.current_config.lock().await;
-        config.clone()
+        self.config.lock().await.clone()
     }
 
     pub fn subscribe_to_changes(&self) -> broadcast::Receiver<ConfigurationResponse> {
         self.change_sender.subscribe()
     }
 
-    // ✅ Update the broadcast to handle potential channel closure gracefully
+    //  Update the broadcast to handle potential channel closure gracefully
     pub async fn execute_command(&self, command: ConfigurationCommand) -> ConfigurationResponse {
         let command_id = command.command_id.clone();
         let timestamp = Utc::now();
@@ -200,7 +200,7 @@ impl DynamicConfigManager {
             }
         };
 
-        // ✅ Broadcast the response with error handling
+        //  Broadcast the response with error handling
         match self.change_sender.send(response.clone()) {
             Ok(_) => info!("📢 Configuration change broadcasted successfully"),
             Err(e) => {
@@ -396,7 +396,7 @@ impl DynamicConfigManager {
                     }
                 }
             }
-            // ✅ Add support for Output target
+            //  Add support for Output target
             ConfigTarget::Output { output_type } => {
                 match output_type.as_str() {
                     "database" => {
@@ -404,137 +404,39 @@ impl DynamicConfigManager {
                             match key.as_str() {
                                 "enabled" => {
                                     let enabled = value.parse::<bool>().map_err(|_| 
-                                        ModbusError::InvalidData("Invalid boolean value for enabled".to_string()))?;
+                                        ModbusError::InvalidData("Invalid boolean value".to_string()))?;
                                     
-                                    let old_value = config.output.database_output
-                                        .as_ref()
-                                        .map(|db| db.enabled.to_string())
-                                        .unwrap_or("false".to_string());
-                                    
-                                    // Ensure database_output exists
                                     if config.output.database_output.is_none() {
                                         config.output.database_output = Some(crate::config::DatabaseOutputConfig::default());
                                     }
-                                    
                                     config.output.database_output.as_mut().unwrap().enabled = enabled;
-                                    
-                                    return Ok((true, 
-                                             format!("Database output enabled changed from {} to {}", old_value, enabled),
-                                             Some(old_value),
-                                             Some(value.clone()),
-                                             false));
-                                }
-                                "database_path" => {
-                                    let old_value = config.output.database_output
-                                        .as_ref()
-                                        .map(|db| db.sqlite_config.database_path.clone())
-                                        .unwrap_or("none".to_string());
-                                    
-                                    // Ensure database_output exists
-                                    if config.output.database_output.is_none() {
-                                        config.output.database_output = Some(crate::config::DatabaseOutputConfig::default());
-                                    }
-                                    
-                                    config.output.database_output.as_mut().unwrap()
-                                        .sqlite_config.database_path = value.clone();
-                                    
-                                    return Ok((true, 
-                                             format!("Database path changed from '{}' to '{}'", old_value, value),
-                                             Some(old_value),
-                                             Some(value.clone()),
-                                             false));
+                                    return Ok((true, format!("Database enabled set to: {}", enabled), None, Some(value.clone()), false));
                                 }
                                 "batch_size" => {
                                     let batch_size = value.parse::<usize>().map_err(|_| 
                                         ModbusError::InvalidData("Invalid batch size".to_string()))?;
                                     
-                                    let old_value = config.output.database_output
-                                        .as_ref()
-                                        .map(|db| db.batch_size.to_string())
-                                        .unwrap_or("100".to_string());
-                                    
-                                    // Ensure database_output exists
                                     if config.output.database_output.is_none() {
                                         config.output.database_output = Some(crate::config::DatabaseOutputConfig::default());
                                     }
-                                    
                                     config.output.database_output.as_mut().unwrap().batch_size = batch_size;
-                                    
-                                    return Ok((true, 
-                                             format!("Database batch size changed from {} to {}", old_value, batch_size),
-                                             Some(old_value),
-                                             Some(value.clone()),
-                                             false));
+                                    return Ok((true, format!("Database batch_size set to: {}", batch_size), None, Some(value.clone()), false));
                                 }
                                 "flush_interval_seconds" => {
                                     let flush_interval = value.parse::<u64>().map_err(|_| 
                                         ModbusError::InvalidData("Invalid flush interval".to_string()))?;
                                     
-                                    let old_value = config.output.database_output
-                                        .as_ref()
-                                        .map(|db| db.flush_interval_seconds.to_string())
-                                        .unwrap_or("60".to_string());
-                                    
-                                    // Ensure database_output exists
                                     if config.output.database_output.is_none() {
                                         config.output.database_output = Some(crate::config::DatabaseOutputConfig::default());
                                     }
-                                    
                                     config.output.database_output.as_mut().unwrap().flush_interval_seconds = flush_interval;
-                                    
-                                    return Ok((true, 
-                                             format!("Database flush interval changed from {} to {} seconds", old_value, flush_interval),
-                                             Some(old_value),
-                                             Some(value.clone()),
-                                             false));
+                                    return Ok((true, format!("Database flush_interval_seconds set to: {}", flush_interval), None, Some(value.clone()), false));
                                 }
-                                _ => {
-                                    return Ok((false, 
-                                             format!("Unknown database parameter: {}", key), 
-                                             None, None, false));
-                                }
+                                _ => return Err(ModbusError::InvalidData(format!("Unknown database parameter: {}", key))),
                             }
                         }
                     }
-                    "file" => {
-                        // Handle file output configuration if needed
-                        for (key, value) in &command.parameters {
-                            match key.as_str() {
-                                "enabled" => {
-                                    let enabled = value.parse::<bool>().map_err(|_| 
-                                        ModbusError::InvalidData("Invalid boolean value for enabled".to_string()))?;
-                                    
-                                    let old_value = config.output.file_output
-                                        .as_ref()
-                                        .map(|file| file.enabled.to_string())
-                                        .unwrap_or("false".to_string());
-                                    
-                                    // Ensure file_output exists
-                                    if config.output.file_output.is_none() {
-                                        config.output.file_output = Some(crate::config::FileOutputConfig::default());
-                                    }
-                                    
-                                    config.output.file_output.as_mut().unwrap().enabled = enabled;
-                                    
-                                    return Ok((true, 
-                                             format!("File output enabled changed from {} to {}", old_value, enabled),
-                                             Some(old_value),
-                                             Some(value.clone()),
-                                             false));
-                                }
-                                _ => {
-                                    return Ok((false, 
-                                             format!("Unknown file output parameter: {}", key), 
-                                             None, None, false));
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        return Ok((false, 
-                                 format!("Unsupported output type: {}", output_type), 
-                                 None, None, false));
-                    }
+                    _ => return Err(ModbusError::InvalidData(format!("Unknown output type: {}", output_type))),
                 }
             }
             // Keep the old catch-all for backward compatibility but make it more specific

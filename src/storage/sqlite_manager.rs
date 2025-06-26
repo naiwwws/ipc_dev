@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use std::sync::Arc;
 
 use crate::config::settings::SqliteConfig;
-use crate::storage::models::{FlowmeterReading, FlowmeterStats}; // ✅ Import FlowmeterStats from models
+use crate::storage::models::{FlowmeterReading, FlowmeterStats}; //  Import FlowmeterStats from models
 use crate::utils::error::ModbusError;
 
 #[derive(Clone)]
@@ -79,7 +79,7 @@ impl SqliteManager {
         // Initialize database schema
         manager.initialize_schema().await?;
 
-        info!("✅ SQLite database initialized successfully");
+        info!(" SQLite database initialized successfully");
         Ok(manager)
     }
 
@@ -109,7 +109,7 @@ impl SqliteManager {
             ModbusError::CommunicationError(format!("Failed to create device_readings table: {}", e))
         })?;
 
-        // ✅ NEW: Create unified flowmeter_readings table
+        //  NEW: Create unified flowmeter_readings table
         sqlx::query(r#"
             CREATE TABLE IF NOT EXISTS flowmeter_readings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,7 +170,7 @@ impl SqliteManager {
         .await
         .map_err(|e| ModbusError::CommunicationError(format!("Failed to create device_status table: {}", e)))?;
 
-        info!("✅ Database schema initialized successfully");
+        info!(" Database schema initialized successfully");
         Ok(())
     }
 
@@ -198,7 +198,7 @@ impl SqliteManager {
                 .map_err(|e| ModbusError::CommunicationError(format!("Failed to create index: {}", e)))?;
         }
 
-        info!("✅ Database indexes created successfully");
+        info!(" Database indexes created successfully");
         Ok(())
     }
 
@@ -227,7 +227,7 @@ impl SqliteManager {
         Ok(())
     }
 
-    // ✅ NEW: Batch insert flowmeter readings
+    //  NEW: Batch insert flowmeter readings
     pub async fn batch_insert_flowmeter_readings(&self, readings: Vec<FlowmeterReading>) -> Result<usize, ModbusError> {
         if readings.is_empty() {
             return Ok(0);
@@ -245,7 +245,7 @@ impl SqliteManager {
         Ok(total_inserted)
     }
 
-    // ✅ NEW: Insert flowmeter chunk with transaction
+    //  NEW: Insert flowmeter chunk with transaction
     async fn insert_flowmeter_chunk(&self, readings: &[FlowmeterReading]) -> Result<usize, ModbusError> {
         let mut tx = self.pool.begin().await.map_err(|e| {
             ModbusError::CommunicationError(format!("Failed to start transaction: {}", e))
@@ -313,7 +313,7 @@ impl SqliteManager {
         Ok(inserted_count)
     }
 
-    // ✅ NEW: Get recent flowmeter readings
+    //  NEW: Get recent flowmeter readings
     pub async fn get_recent_flowmeter_readings(&self, limit: i64, offset: i64) -> Result<Vec<FlowmeterReading>, ModbusError> {
         let readings = sqlx::query_as::<_, FlowmeterReading>(r#"
             SELECT * FROM flowmeter_readings 
@@ -329,7 +329,7 @@ impl SqliteManager {
         Ok(readings)
     }
 
-    // ✅ NEW: Get flowmeter readings by device
+    //  NEW: Get flowmeter readings by device
     pub async fn get_device_flowmeter_readings(
         &self, 
         device_uuid: &str, 
@@ -370,7 +370,7 @@ impl SqliteManager {
         Ok(readings)
     }
 
-    // ✅ NEW: Get flowmeter statistics
+    //  NEW: Get flowmeter statistics
     pub async fn get_flowmeter_stats(&self) -> Result<FlowmeterStats, ModbusError> {
         let stats = sqlx::query_as::<_, FlowmeterStats>(r#"
             SELECT 
@@ -445,7 +445,7 @@ impl SqliteManager {
     }
 }
 
-// ✅ KEEP DatabaseStats here but export it
+//  KEEP DatabaseStats here but export it
 #[derive(Debug)]
 pub struct DatabaseStats {
     pub total_readings: i64,

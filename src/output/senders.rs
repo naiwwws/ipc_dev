@@ -75,7 +75,7 @@ impl DataSender for FileSender {
                 })?;
         }
         
-        info!("✅ Data written successfully to file: {}", self.file_path);
+        info!(" Data written successfully to file: {}", self.file_path);
         Ok(())
     }
     

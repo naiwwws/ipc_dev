@@ -59,7 +59,7 @@ impl FlowmeterDevice {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowmeterData {
-    pub device_address: u8, // ✅ Ensure this field exists
+    pub device_address: u8, //  Ensure this field exists
     pub timestamp: DateTime<Utc>,
     pub mass_flow_rate: f32,
     pub density_flow: f32,
@@ -176,7 +176,7 @@ impl DeviceData for FlowmeterData {
         self
     }
     
-    // ✅ Add the missing device_address method
+    //  Add the missing device_address method
     fn device_address(&self) -> u8 {
         self.device_address
     }
@@ -230,7 +230,7 @@ impl DeviceData for FlowmeterData {
         "Unknown".to_string()
     }
     
-    // ✅ Add clone method for storage
+    //  Add clone method for storage
     fn clone_box(&self) -> Box<dyn DeviceData> {
         Box::new(self.clone())
     }

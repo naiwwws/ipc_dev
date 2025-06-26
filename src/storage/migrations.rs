@@ -23,7 +23,7 @@ impl DatabaseMigrations {
         Self::apply_migration_v1(pool).await?;
         Self::apply_migration_v2(pool).await?;
         
-        info!("✅ All migrations completed");
+        info!(" All migrations completed");
         Ok(())
     }
 

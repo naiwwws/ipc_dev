@@ -49,7 +49,7 @@ impl DataService {
             }
         }
 
-        // ✅ Initialize and start database service
+        //  Initialize and start database service
         let database_service = if config.output.database_output.as_ref().map(|db| db.enabled).unwrap_or(false) {
             let mut db_service = DatabaseService::new(config.clone()).await?;
             db_service.start().await?;
@@ -76,12 +76,12 @@ impl DataService {
         })
     }
 
-    // ✅ Helper method to get device config by address
+    //  Helper method to get device config by address
     fn get_device_config_by_address(&self, address: u8) -> Option<&crate::config::DeviceConfig> {
         self.config.devices.iter().find(|d| d.address == address)
     }
 
-    // ✅ Database storage method
+    //  Database storage method
     async fn store_device_data_to_database(
         &self,
         device_address: u8,
@@ -115,7 +115,7 @@ impl DataService {
         self.device_address_to_uuid.get(&address)
     }
 
-    // ✅ Fixed run method
+    //  Fixed run method
     pub async fn run(&self, debug_output: bool) -> Result<(), ModbusError> {
         info!("🚀 Starting continuous monitoring");
         if self.database_service.is_some() {
@@ -143,12 +143,12 @@ impl DataService {
                             }
                         }
                         
-                        // ✅ Store to database if enabled
+                        //  Store to database if enabled
                         if let Err(e) = self.store_device_data_to_database(addr, data.as_ref()).await {
                             error!("❌ Failed to store device {} data to database: {}", addr, e);
                         }
                         
-                        info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
+                        info!(" Successfully read and stored data from device {} ({})", addr, device.name());
                         success_count += 1;
                     }
                     Err(e) => {
@@ -168,7 +168,7 @@ impl DataService {
         }
     }
 
-    // ✅ Fixed read_all_devices_once method
+    //  Fixed read_all_devices_once method
     pub async fn read_all_devices_once(&self) -> Result<(), ModbusError> {
         info!("📖 Reading data from all devices once...");
         
@@ -179,12 +179,12 @@ impl DataService {
                 Ok(data) => {
                     let device_address = device.address();
                     
-                    // ✅ Clone the UUID to avoid borrowing issues
+                    //  Clone the UUID to avoid borrowing issues
                     let device_uuid = self.get_uuid_from_address(device_address)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string());
                     
-                    // ✅ Store in database if database service is available
+                    //  Store in database if database service is available
                     if let Err(e) = self.store_device_data_to_database(device_address, data.as_ref()).await {
                         error!("Failed to store device data: {}", e);
                     }
@@ -386,7 +386,7 @@ impl DataService {
         Ok(())
     }
 
-    // ✅ CLI interface methods
+    //  CLI interface methods
     pub fn set_formatter(&mut self, formatter: Box<dyn DataFormatter>) {
         self.formatter = formatter;
     }

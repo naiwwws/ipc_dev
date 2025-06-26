@@ -65,7 +65,7 @@ impl MqttConfigHandler {
             tokio::spawn(async move {
                 while let Ok(message) = receiver.recv().await {
                     match Self::handle_mqtt_message(&message, &config_manager, &mqtt_client, &response_topic).await {
-                        Ok(_) => info!("✅ Successfully processed MQTT configuration message"),
+                        Ok(_) => info!(" Successfully processed MQTT configuration message"),
                         Err(e) => error!("❌ Failed to handle MQTT configuration message: {}", e),
                     }
                 }

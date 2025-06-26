@@ -6,7 +6,7 @@ use tokio::time::{interval, Duration};
 
 use crate::config::Config;
 use crate::devices::DeviceData;
-use crate::storage::{SqliteManager, FlowmeterReading, FlowmeterStats, DatabaseStats}; // ✅ Add DatabaseStats import
+use crate::storage::{SqliteManager, FlowmeterReading, FlowmeterStats, DatabaseStats}; //  Add DatabaseStats import
 use crate::utils::error::ModbusError;
 
 pub struct DatabaseService {
@@ -35,7 +35,7 @@ impl DatabaseService {
         })
     }
 
-    // ✅ Store flowmeter data as unified structure
+    //  Store flowmeter data as unified structure
     pub async fn store_device_data(
         &self,
         device_uuid: &str,
@@ -70,7 +70,7 @@ impl DatabaseService {
         Ok(())
     }
 
-    // ✅ Add flowmeter readings to batch
+    //  Add flowmeter readings to batch
     async fn add_flowmeter_to_batch(&self, readings: Vec<FlowmeterReading>) -> Result<(), ModbusError> {
         if readings.is_empty() {
             return Ok(());
@@ -106,7 +106,7 @@ impl DatabaseService {
         Ok(())
     }
 
-    // ✅ Start batch processor for flowmeter data
+    //  Start batch processor for flowmeter data
     pub async fn start(&mut self) -> Result<(), ModbusError> {
         if *self.is_running.read().await {
             return Ok(());
@@ -131,7 +131,7 @@ impl DatabaseService {
         Ok(())
     }
 
-    // ✅ Flowmeter batch processor
+    //  Flowmeter batch processor
     async fn flowmeter_batch_processor(
         buffer: Arc<RwLock<Vec<FlowmeterReading>>>,
         manager: SqliteManager,
@@ -192,12 +192,12 @@ impl DatabaseService {
         info!("🏁 Flowmeter batch processor stopped");
     }
 
-    // ✅ Get flowmeter readings
+    //  Get flowmeter readings
     pub async fn get_recent_flowmeter_readings(&self, limit: i64) -> Result<Vec<FlowmeterReading>, ModbusError> {
         self.sqlite_manager.get_recent_flowmeter_readings(limit, 0).await
     }
 
-    // ✅ Get device flowmeter readings
+    //  Get device flowmeter readings
     pub async fn get_device_flowmeter_readings(
         &self,
         device_uuid: &str,
@@ -214,12 +214,12 @@ impl DatabaseService {
         ).await
     }
 
-    // ✅ Get flowmeter statistics
+    //  Get flowmeter statistics
     pub async fn get_flowmeter_stats(&self) -> Result<FlowmeterStats, ModbusError> {
         self.sqlite_manager.get_flowmeter_stats().await
     }
 
-    // ✅ Force flush flowmeter buffer
+    //  Force flush flowmeter buffer
     pub async fn flush_flowmeter_buffer(&self) -> Result<usize, ModbusError> {
         let readings_to_flush = {
             let mut buffer = self.flowmeter_batch_buffer.write().await;
@@ -235,7 +235,7 @@ impl DatabaseService {
         Ok(count)
     }
 
-    // ✅ Graceful shutdown
+    //  Graceful shutdown
     pub async fn shutdown(&mut self) -> Result<(), ModbusError> {
         info!("🛑 Shutting down database service...");
         
@@ -248,11 +248,11 @@ impl DatabaseService {
         // Force final flush
         let _ = self.flush_flowmeter_buffer().await;
         
-        info!("✅ Database service shutdown complete");
+        info!(" Database service shutdown complete");
         Ok(())
     }
 
-    // ✅ Add the missing get_stats method
+    //  Add the missing get_stats method
     pub async fn get_stats(&self) -> Result<DatabaseStats, ModbusError> {
         self.sqlite_manager.get_database_stats().await
     }

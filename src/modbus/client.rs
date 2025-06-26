@@ -57,7 +57,7 @@ impl ModbusClient {
                 ModbusError::ConnectionError(format!("Failed to open port: {}", e))
             })?;
 
-        info!("✅ Modbus RTU connection established successfully");
+        info!(" Modbus RTU connection established successfully");
         Ok(Self {
             port: Arc::new(Mutex::new(port)),
         })
