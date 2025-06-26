@@ -102,6 +102,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_name("BROKER,TOPIC")
                 .help("Send output to MQTT broker (format: broker_url,topic)"),
         )
+        .arg(
+            Arg::new("socket-port")
+                .long("socket-port")
+                .value_name("PORT")
+                .help("Enable socket server on specified port (default: 8080)"),
+        )
+        .arg(
+            Arg::new("socket")
+                .long("socket")
+                .action(clap::ArgAction::SetTrue)
+                .help("Enable socket server on default port (8080)"),
+        )
         .subcommand(
             Command::new("getdata")
                 .about("Get all device data")
@@ -299,14 +311,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load config from file or command line
     let config_file = matches.get_one::<String>("config-file").unwrap();
-    let config = if std::path::Path::new(config_file).exists() {
-        info!("📁 Loading configuration from: {}", config_file);
+    let mut config = if std::path::Path::new(config_file).exists() {
+        info!("📁 Loading config from file: {}", config_file);
         Config::from_file(config_file).unwrap_or_else(|e| {
-            eprintln!("⚠️  Failed to load config file: {}, using CLI args", e);
-            Config::from_matches(&matches).unwrap_or_else(|e| {
-                eprintln!("❌ Failed to parse CLI args: {}, using defaults", e);
-                Config::default()
-            })
+            eprintln!("❌ Failed to load config file: {}, using defaults", e);
+            Config::default()
         })
     } else {
         info!("📁 Config file not found, using CLI args and defaults");
@@ -324,6 +333,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         config
     };
+
+    // ✅ Now you can modify config because it's mutable
+    if matches.get_flag("socket") || matches.contains_id("socket-port") {
+        config.socket_server.enabled = true;
+        
+        if let Some(port_str) = matches.get_one::<String>("socket-port") {
+            config.socket_server.port = port_str.parse::<u16>()
+                .unwrap_or_else(|_| {
+                    eprintln!("Invalid port number, using default 8080");
+                    8080
+                });
+        }
+        
+        info!("🔌 Socket server will start on port {}", config.socket_server.port);
+    }
 
     let mut service = DataService::new(config.clone()).await?;
 

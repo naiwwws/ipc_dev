@@ -9,7 +9,7 @@ use crate::modbus::ModbusClient;
 use crate::devices::{Device, DeviceData, FlowmeterDevice};
 use crate::output::{DataFormatter, DataSender, ConsoleFormatter, ConsoleSender};
 use crate::output::raw_sender::{RawDataSender, RawDataFormat};
-use crate::services::DatabaseService;
+use crate::services::{DatabaseService, SocketServer};
 use crate::utils::error::ModbusError;
 
 pub struct DataService {
@@ -21,6 +21,9 @@ pub struct DataService {
     formatter: Box<dyn DataFormatter>,
     senders: Vec<Box<dyn DataSender>>,
     database_service: Option<DatabaseService>,
+
+    // ✅ ADD: Socket server
+    socket_server: Option<Arc<SocketServer>>,
 }
 
 impl DataService {
@@ -64,6 +67,26 @@ impl DataService {
         let mut senders: Vec<Box<dyn DataSender>> = Vec::new();
         senders.push(Box::new(ConsoleSender));
 
+        // ✅ ADD: Initialize socket server if enabled
+        let socket_server = if config.socket_server.enabled {
+            let server = SocketServer::new(config.socket_server.port).await?;
+            let server_arc = Arc::new(server);
+            
+            // Start server in background
+            let server_clone = Arc::clone(&server_arc);
+            tokio::spawn(async move {
+                if let Err(e) = server_clone.start().await {
+                    error!("Socket server error: {}", e);
+                }
+            });
+            
+            info!("🔌 Socket server enabled on port {}", config.socket_server.port);
+            Some(server_arc)
+        } else {
+            info!("📝 Socket server disabled");
+            None
+        };
+
         Ok(DataService {
             config,
             devices,
@@ -73,6 +96,7 @@ impl DataService {
             formatter,
             senders,
             database_service,
+            socket_server,  // ✅ ADD
         })
     }
 
@@ -123,6 +147,12 @@ impl DataService {
         } else {
             info!("📝 Database storage: DISABLED");
         }
+        
+        if self.socket_server.is_some() {
+            info!("🔌 Socket streaming: ENABLED");
+        } else {
+            info!("📝 Socket streaming: DISABLED");
+        }
 
         let mut interval = interval(Duration::from_secs(self.config.update_interval_seconds));
 
@@ -148,7 +178,20 @@ impl DataService {
                             error!("❌ Failed to store device {} data to database: {}", addr, e);
                         }
                         
-                        info!(" Successfully read and stored data from device {} ({})", addr, device.name());
+                        // ✅ ADD: Broadcast to socket clients if enabled
+                        if let Some(socket_server) = &self.socket_server {
+                            if let Some(uuid) = self.get_uuid_from_address(addr) {
+                                socket_server.broadcast_device_data(
+                                    addr,
+                                    device.name(),
+                                    uuid,
+                                    data.as_ref(),
+                                );
+                                info!("📡 Broadcasted data from device {} to socket clients", addr);
+                            }
+                        }
+                        
+                        info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
                         success_count += 1;
                     }
                     Err(e) => {
@@ -478,5 +521,90 @@ impl DataService {
             println!("❌ Database service not enabled");
         }
         Ok(())
+    }
+
+    // ✅ UPDATE: Add socket broadcasting to run method (around line 140)
+    pub async fn run_socket(&self, debug_output: bool) -> Result<(), ModbusError> {
+        info!("🚀 Starting continuous monitoring");
+        if self.database_service.is_some() {
+            info!("💾 Database storage: ENABLED");
+        } else {
+            info!("📝 Database storage: DISABLED");
+        }
+        
+        if self.socket_server.is_some() {
+            info!("🔌 Socket streaming: ENABLED");
+        } else {
+            info!("📝 Socket streaming: DISABLED");
+        }
+
+        let mut interval = interval(Duration::from_secs(self.config.update_interval_seconds));
+
+        loop {
+            interval.tick().await;
+            info!("🔄 Requesting data from devices");
+            
+            let mut success_count = 0;
+            for device in &self.devices {
+                match device.read_data(self.modbus_client.as_ref()).await {
+                    Ok(data) => {
+                        let addr = device.address();
+                        
+                        // Store to in-memory cache
+                        if let Some(uuid) = self.get_uuid_from_address(addr) {
+                            if let Ok(mut device_data) = self.device_data.lock() {
+                                device_data.insert(uuid.clone(), data.as_ref().clone_box());
+                            }
+                        }
+                        
+                        //  Store to database if enabled
+                        if let Err(e) = self.store_device_data_to_database(addr, data.as_ref()).await {
+                            error!("❌ Failed to store device {} data to database: {}", addr, e);
+                        }
+                        
+                        // ✅ ADD: Broadcast to socket clients if enabled
+                        if let Some(socket_server) = &self.socket_server {
+                            if let Some(uuid) = self.get_uuid_from_address(addr) {
+                                socket_server.broadcast_device_data(
+                                    addr,
+                                    device.name(),
+                                    uuid,
+                                    data.as_ref(),
+                                );
+                                info!("📡 Broadcasted data from device {} to socket clients", addr);
+                            }
+                        }
+                        
+                        info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        error!("❌ Failed to read data from device {} ({}): {:?}", 
+                               device.address(), device.name(), e);
+                    }
+                }
+                
+                sleep(Duration::from_millis(100)).await;
+            }
+
+            if debug_output && success_count > 0 {
+                if let Err(e) = self.print_all_device_data().await {
+                    error!("❌ Failed to print device data: {:?}", e);
+                }
+            }
+        }
+    }
+
+    // ✅ ADD: Socket management methods
+    pub async fn get_socket_client_stats(&self) -> Option<HashMap<String, crate::services::socket_server::ClientInfo>> {
+        if let Some(socket_server) = &self.socket_server {
+            Some(socket_server.get_client_stats().await)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_socket_port(&self) -> Option<u16> {
+        self.socket_server.as_ref().map(|s| s.port())
     }
 }

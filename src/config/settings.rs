@@ -38,6 +38,9 @@ pub struct Config {
     
     // Legacy compatibility
     pub device_addresses: Vec<u8>,
+
+    // ✅ ADD: Socket server configuration
+    pub socket_server: SocketServerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +163,23 @@ impl Default for DatabaseOutputConfig {
             sqlite_config: SqliteConfig::default(),
             batch_size: 100,
             flush_interval_seconds: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketServerConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub max_clients: Option<usize>,
+}
+
+impl Default for SocketServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8080,
+            max_clients: Some(10),
         }
     }
 }
@@ -310,6 +330,9 @@ impl Default for Config {
             
             // Legacy compatibility
             device_addresses: default_devices.iter().map(|d| d.address).collect(),
+
+            // Socket server configuration
+            socket_server: SocketServerConfig::default(),
         }
     }
 }
