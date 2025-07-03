@@ -4,6 +4,7 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt;
 
 use super::traits::{Device, DeviceData};
@@ -206,16 +207,31 @@ impl DeviceData for FlowmeterData {
     
     fn get_all_parameters(&self) -> Vec<(String, String)> {
         vec![
-            ("MassFlowRate".to_string(), format!("{:.2} kg/h", self.mass_flow_rate)),
-            ("DensityFlow".to_string(), format!("{:.4} kg/L", self.density_flow)),
-            ("Temperature".to_string(), format!("{:.1}°C", self.temperature)),
-            ("VolumeFlowRate".to_string(), format!("{:.3} L/h", self.volume_flow_rate)),
-            ("MassTotal".to_string(), format!("{:.2} kg", self.mass_total)),
-            ("VolumeTotal".to_string(), format!("{:.3} L", self.volume_total)),
-            ("MassInventory".to_string(), format!("{:.2} kg", self.mass_inventory)),
-            ("VolumeInventory".to_string(), format!("{:.3} L", self.volume_inventory)),
+            ("MassFlowRate".to_string(), self.mass_flow_rate.to_string()),
+            ("DensityFlow".to_string(), self.density_flow.to_string()),
+            ("Temperature".to_string(), self.temperature.to_string()),
+            ("VolumeFlowRate".to_string(), self.volume_flow_rate.to_string()),
+            ("MassTotal".to_string(), self.mass_total.to_string()),
+            ("VolumeTotal".to_string(), self.volume_total.to_string()),
+            ("MassInventory".to_string(), self.mass_inventory.to_string()),
+            ("VolumeInventory".to_string(), self.volume_inventory.to_string()),
             ("ErrorCode".to_string(), self.error_code.to_string()),
         ]
+    }
+    
+    // ADD: New method to return raw float values
+    fn get_parameters_as_floats(&self) -> HashMap<String, f32> {
+        let mut params = HashMap::new();
+        params.insert("MassFlowRate".to_string(), self.mass_flow_rate);
+        params.insert("DensityFlow".to_string(), self.density_flow);
+        params.insert("Temperature".to_string(), self.temperature);
+        params.insert("VolumeFlowRate".to_string(), self.volume_flow_rate);
+        params.insert("MassTotal".to_string(), self.mass_total);
+        params.insert("VolumeTotal".to_string(), self.volume_total);
+        params.insert("MassInventory".to_string(), self.mass_inventory);
+        params.insert("VolumeInventory".to_string(), self.volume_inventory);
+        params.insert("ErrorCode".to_string(), self.error_code as f32);
+        params
     }
     
     fn device_type(&self) -> String {

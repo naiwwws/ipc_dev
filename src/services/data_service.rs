@@ -1,6 +1,5 @@
 use log::{error, info, warn};
 use std::collections::HashMap;
-use std::fmt::Pointer;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, interval, Duration};
 
@@ -68,8 +67,8 @@ impl DataService {
         senders.push(Box::new(ConsoleSender));
 
         // ✅ ADD: Initialize socket server if enabled
-        let socket_server = if config.socket_server.enabled {
-            let server = SocketServer::new(config.socket_server.port).await?;
+        let socket_server: Option<Arc<SocketServer>> = if config.socket_server.enabled {
+            let server = SocketServer::new(config.clone()); // Pass entire config
             let server_arc = Arc::new(server);
             
             // Start server in background
@@ -96,7 +95,7 @@ impl DataService {
             formatter,
             senders,
             database_service,
-            socket_server,  // ✅ ADD
+            socket_server,
         })
     }
 
@@ -139,7 +138,7 @@ impl DataService {
         self.device_address_to_uuid.get(&address)
     }
 
-    //  Fixed run method
+    //  Fixed run method - use send_device_data instead of broadcast_device_data
     pub async fn run(&self, debug_output: bool) -> Result<(), ModbusError> {
         info!("🚀 Starting continuous monitoring");
         if self.database_service.is_some() {
@@ -178,16 +177,12 @@ impl DataService {
                             error!("❌ Failed to store device {} data to database: {}", addr, e);
                         }
                         
-                        // ✅ ADD: Broadcast to socket clients if enabled
+                        // FIX: Use send_device_data instead of broadcast_device_data
                         if let Some(socket_server) = &self.socket_server {
-                            if let Some(uuid) = self.get_uuid_from_address(addr) {
-                                socket_server.broadcast_device_data(
-                                    addr,
-                                    device.name(),
-                                    uuid,
-                                    data.as_ref(),
-                                );
-                                info!("📡 Broadcasted data from device {} to socket clients", addr);
+                            if let Err(e) = socket_server.send_device_data(data.as_ref()).await {
+                                error!("❌ Failed to send data to socket clients: {}", e);
+                            } else {
+                                info!("📡 Sent data from device {} to socket clients", addr);
                             }
                         }
                         
@@ -471,16 +466,16 @@ impl DataService {
                 let readings = db_service.get_device_flowmeter_readings(uuid, None, Some(limit)).await?;
                 
                 println!("📋 Recent flowmeter readings for device {}:", device_address);
-                println!("{:<12} {:<12} {:<12} {:<12} {:<12} {:<8} {:<25}", 
+                println!("{:<15} {:<15} {:<15} {:<15} {:<8} {:<10} {:<25}", 
                     "Mass Flow", "Temperature", "Density", "Vol Flow", "Error", "Quality", "Timestamp");
-                println!("{}", "-".repeat(100));
+                println!("{}", "-".repeat(110));
                 
                 for reading in readings {
-                    println!("{:<12} {:<12} {:<12} {:<12} {:<12} {:<8} {:<25}", 
-                        format!("{:.2}", reading.mass_flow_rate),
-                        format!("{:.1}", reading.temperature),
-                        format!("{:.4}", reading.density_flow),
-                        format!("{:.3}", reading.volume_flow_rate),
+                    println!("{:<15.2} {:<15.2} {:<15.4} {:<15.3} {:<8} {:<10} {:<25}", 
+                        reading.mass_flow_rate,     // f32 with 2 decimal places
+                        reading.temperature,        // f32 with 2 decimal places
+                        reading.density_flow,       // f32 with 4 decimal places
+                        reading.volume_flow_rate,   // f32 with 3 decimal places
                         reading.error_code,
                         reading.quality_flag,
                         reading.timestamp.format("%Y-%m-%d %H:%M:%S")
@@ -503,16 +498,16 @@ impl DataService {
             println!("Total Readings: {}", stats.total_readings);
             println!("Active Devices: {}", stats.active_devices);
             if let Some(avg_flow) = stats.avg_mass_flow_rate {
-                println!("Average Mass Flow Rate: {:.2} kg/h", avg_flow);
+                println!("Average Mass Flow Rate: {:.2}", avg_flow);  // f32 with 2 decimal places
             }
             if let Some(max_flow) = stats.max_mass_flow_rate {
-                println!("Maximum Mass Flow Rate: {:.2} kg/h", max_flow);
+                println!("Maximum Mass Flow Rate: {:.2}", max_flow);  // f32 with 2 decimal places
             }
             if let Some(min_flow) = stats.min_mass_flow_rate {
-                println!("Minimum Mass Flow Rate: {:.2} kg/h", min_flow);
+                println!("Minimum Mass Flow Rate: {:.2}", min_flow);  // f32 with 2 decimal places
             }
             if let Some(avg_temp) = stats.avg_temperature {
-                println!("Average Temperature: {:.1} °C", avg_temp);
+                println!("Average Temperature: {:.2}", avg_temp);     // f32 with 2 decimal places
             }
             if let Some(latest) = stats.latest_reading {
                 println!("Latest Reading: {}", latest.format("%Y-%m-%d %H:%M:%S"));
@@ -562,16 +557,12 @@ impl DataService {
                             error!("❌ Failed to store device {} data to database: {}", addr, e);
                         }
                         
-                        // ✅ ADD: Broadcast to socket clients if enabled
+                        // FIX: Use send_device_data instead of broadcast_device_data
                         if let Some(socket_server) = &self.socket_server {
-                            if let Some(uuid) = self.get_uuid_from_address(addr) {
-                                socket_server.broadcast_device_data(
-                                    addr,
-                                    device.name(),
-                                    uuid,
-                                    data.as_ref(),
-                                );
-                                info!("📡 Broadcasted data from device {} to socket clients", addr);
+                            if let Err(e) = socket_server.send_device_data(data.as_ref()).await {
+                                error!("❌ Failed to send data to socket clients: {}", e);
+                            } else {
+                                info!("📡 Sent data from device {} to socket clients", addr);
                             }
                         }
                         
