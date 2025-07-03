@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-//  CORRECTED: Unified Flowmeter Reading Structure
+// FIX: Import DeviceData from the correct module path
+use crate::devices::traits::DeviceData;
+
+// CORRECTED: Unified Flowmeter Reading Structure with Unix timestamps
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FlowmeterReading {
     pub id: Option<i64>,
@@ -10,7 +13,7 @@ pub struct FlowmeterReading {
     pub device_address: u8,
     pub device_name: String,
     pub device_location: String,
-    pub timestamp: DateTime<Utc>,
+    pub unix_timestamp: i64, // Unix timestamp for compatibility
 
     // Flow measurement parameters (units removed)
     pub mass_flow_rate: f32,
@@ -32,7 +35,7 @@ pub struct FlowmeterReading {
     pub site_id: String,
     pub batch_id: Option<String>,
     pub quality_flag: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: i64,
 }
 
 // Keep DeviceStatus for monitoring
@@ -52,14 +55,14 @@ pub struct DeviceStatus {
 pub struct SystemMetrics {
     pub id: Option<i64>,
     pub timestamp: DateTime<Utc>,
-    pub cpu_usage: f32,
-    pub memory_usage: f32,
-    pub disk_usage: f32,
-    pub network_throughput: f32,
+    pub cpu_usage: f64,
+    pub memory_usage: f64,
+    pub disk_usage: f64,
+    pub network_throughput: f64,
     pub active_connections: i32,
 }
 
-//  CORRECTED: Statistics for flowmeter data
+// CORRECTED: Statistics for flowmeter data
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct FlowmeterStats {
     pub total_readings: i64,
@@ -72,7 +75,7 @@ pub struct FlowmeterStats {
     pub earliest_reading: Option<DateTime<Utc>>,
 }
 
-//  CORRECTED: Constructor for FlowmeterReading
+// CORRECTED: Constructor for FlowmeterReading
 impl FlowmeterReading {
     pub fn from_flowmeter_data(
         device_uuid: String,
@@ -83,35 +86,29 @@ impl FlowmeterReading {
         ipc_uuid: String,
         site_id: String,
     ) -> Self {
+        let now = Utc::now().timestamp();
+        
         Self {
             id: None,
             device_uuid,
             device_address,
             device_name,
             device_location,
-            timestamp: flowmeter_data.timestamp,
-
-            // Flow parameters with units
+            unix_timestamp: flowmeter_data.unix_timestamp(),
             mass_flow_rate: flowmeter_data.mass_flow_rate,
             density_flow: flowmeter_data.density_flow,
             temperature: flowmeter_data.temperature,
             volume_flow_rate: flowmeter_data.volume_flow_rate,
-
-            // Accumulation parameters
             mass_total: flowmeter_data.mass_total,
             volume_total: flowmeter_data.volume_total,
             mass_inventory: flowmeter_data.mass_inventory,
             volume_inventory: flowmeter_data.volume_inventory,
-
-            // Status
             error_code: flowmeter_data.error_code,
-
-            // System fields
             ipc_uuid,
             site_id,
             batch_id: None,
             quality_flag: "GOOD".to_string(),
-            created_at: Utc::now(),
+            created_at: now,
         }
     }
 }

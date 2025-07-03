@@ -186,6 +186,10 @@ impl DeviceData for FlowmeterData {
         self.timestamp
     }
     
+    fn unix_timestamp(&self) -> i64 {
+        self.timestamp.timestamp()
+    }
+
     fn to_json(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }

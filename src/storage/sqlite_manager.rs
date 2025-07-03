@@ -99,7 +99,7 @@ impl SqliteManager {
                 parameter_value TEXT NOT NULL,
                 parameter_unit TEXT,
                 raw_value REAL,
-                timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                unix_timestamp INTEGER NOT NULL,
                 ipc_uuid TEXT NOT NULL,
                 site_id TEXT NOT NULL,
                 batch_id TEXT,
@@ -109,7 +109,7 @@ impl SqliteManager {
             ModbusError::CommunicationError(format!("Failed to create device_readings table: {}", e))
         })?;
 
-        // Create unified flowmeter_readings table WITHOUT unit columns
+        // Create unified flowmeter_readings table with Unix timestamps
         sqlx::query(r#"
             CREATE TABLE IF NOT EXISTS flowmeter_readings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,7 +117,7 @@ impl SqliteManager {
                 device_address INTEGER NOT NULL,
                 device_name TEXT NOT NULL,
                 device_location TEXT NOT NULL,
-                timestamp DATETIME NOT NULL,
+                unix_timestamp INTEGER NOT NULL,
                 
                 -- Flow measurement parameters (units removed)
                 mass_flow_rate REAL NOT NULL,
@@ -139,7 +139,7 @@ impl SqliteManager {
                 site_id TEXT NOT NULL,
                 batch_id TEXT,
                 quality_flag TEXT NOT NULL DEFAULT 'GOOD',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                created_at INTEGER NOT NULL
             )
         "#)
         .execute(&self.pool)
@@ -151,11 +151,11 @@ impl SqliteManager {
             CREATE TABLE IF NOT EXISTS device_status (
                 device_uuid TEXT PRIMARY KEY,
                 device_address INTEGER NOT NULL,
-                last_seen DATETIME NOT NULL,
+                last_seen INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'UNKNOWN',
                 error_count INTEGER DEFAULT 0,
                 total_readings INTEGER DEFAULT 0,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                updated_at INTEGER NOT NULL
             )
         "#)
         .execute(&self.pool)
@@ -172,14 +172,14 @@ impl SqliteManager {
     async fn create_indexes(&self) -> Result<(), ModbusError> {
         let indexes = vec![
             // Flowmeter table indexes
-            "CREATE INDEX IF NOT EXISTS idx_flowmeter_timestamp ON flowmeter_readings(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_flowmeter_timestamp ON flowmeter_readings(unix_timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_flowmeter_device_uuid ON flowmeter_readings(device_uuid)",
             "CREATE INDEX IF NOT EXISTS idx_flowmeter_device_address ON flowmeter_readings(device_address)",
             "CREATE INDEX IF NOT EXISTS idx_flowmeter_created_at ON flowmeter_readings(created_at)",
             
             // Composite indexes for common queries
-            "CREATE INDEX IF NOT EXISTS idx_flowmeter_device_time ON flowmeter_readings(device_uuid, timestamp)",
-            "CREATE INDEX IF NOT EXISTS idx_flowmeter_address_time ON flowmeter_readings(device_address, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_flowmeter_device_time ON flowmeter_readings(device_uuid, unix_timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_flowmeter_address_time ON flowmeter_readings(device_address, unix_timestamp)",
             
             // Performance indexes
             "CREATE INDEX IF NOT EXISTS idx_flowmeter_quality ON flowmeter_readings(quality_flag)",
@@ -199,21 +199,26 @@ impl SqliteManager {
 
     // Update device status efficiently
     pub async fn update_device_status(&self, device_uuid: &str, device_address: u8, status: &str) -> Result<(), ModbusError> {
+        let now = Utc::now().timestamp();
+        
         sqlx::query(r#"
             INSERT OR REPLACE INTO device_status (
                 device_uuid, device_address, last_seen, status, 
-                error_count, total_readings
+                error_count, total_readings, updated_at
             ) VALUES (
-                ?, ?, CURRENT_TIMESTAMP, ?,
+                ?, ?, ?, ?,
                 COALESCE((SELECT error_count FROM device_status WHERE device_uuid = ?), 0),
-                COALESCE((SELECT total_readings FROM device_status WHERE device_uuid = ?), 0) + 1
+                COALESCE((SELECT total_readings FROM device_status WHERE device_uuid = ?), 0) + 1,
+                ?
             )
         "#)
         .bind(device_uuid)
         .bind(device_address)
+        .bind(now)
         .bind(status)
         .bind(device_uuid)
         .bind(device_uuid)
+        .bind(now)
         .execute(&self.pool)
         .await
         .map_err(|e| ModbusError::CommunicationError(format!("Failed to update device status: {}", e)))?;
@@ -239,7 +244,7 @@ impl SqliteManager {
         Ok(total_inserted)
     }
 
-    // Insert flowmeter chunk with transaction (without units)
+    // Insert flowmeter chunk with transaction (using Unix timestamps)
     async fn insert_flowmeter_chunk(&self, readings: &[FlowmeterReading]) -> Result<usize, ModbusError> {
         let mut tx = self.pool.begin().await.map_err(|e| {
             ModbusError::CommunicationError(format!("Failed to start transaction: {}", e))
@@ -250,7 +255,7 @@ impl SqliteManager {
         for reading in readings {
             let result = sqlx::query(r#"
                 INSERT INTO flowmeter_readings (
-                    device_uuid, device_address, device_name, device_location, timestamp,
+                    device_uuid, device_address, device_name, device_location, unix_timestamp,
                     mass_flow_rate, density_flow, temperature, volume_flow_rate,
                     mass_total, volume_total, mass_inventory, volume_inventory,
                     error_code, ipc_uuid, site_id, batch_id, quality_flag, created_at
@@ -260,7 +265,7 @@ impl SqliteManager {
             .bind(reading.device_address)
             .bind(&reading.device_name)
             .bind(&reading.device_location)
-            .bind(reading.timestamp)
+            .bind(reading.unix_timestamp)
             .bind(reading.mass_flow_rate)
             .bind(reading.density_flow)
             .bind(reading.temperature)
@@ -297,7 +302,7 @@ impl SqliteManager {
     pub async fn get_recent_flowmeter_readings(&self, limit: i64, offset: i64) -> Result<Vec<FlowmeterReading>, ModbusError> {
         let readings = sqlx::query_as::<_, FlowmeterReading>(r#"
             SELECT * FROM flowmeter_readings 
-            ORDER BY timestamp DESC 
+            ORDER BY unix_timestamp DESC 
             LIMIT ? OFFSET ?
         "#)
         .bind(limit)
@@ -321,16 +326,16 @@ impl SqliteManager {
         let mut bindings = vec![device_uuid.to_string()];
 
         if let Some(start) = start_time {
-            query.push_str(" AND timestamp >= ?");
-            bindings.push(start.to_rfc3339());
+            query.push_str(" AND unix_timestamp >= ?");
+            bindings.push(start.timestamp().to_string());
         }
 
         if let Some(end) = end_time {
-            query.push_str(" AND timestamp <= ?");
-            bindings.push(end.to_rfc3339());
+            query.push_str(" AND unix_timestamp <= ?");
+            bindings.push(end.timestamp().to_string());
         }
 
-        query.push_str(" ORDER BY timestamp DESC");
+        query.push_str(" ORDER BY unix_timestamp DESC");
 
         if let Some(limit_val) = limit {
             query.push_str(" LIMIT ?");
@@ -360,8 +365,8 @@ impl SqliteManager {
                 MAX(mass_flow_rate) as max_mass_flow_rate,
                 MIN(mass_flow_rate) as min_mass_flow_rate,
                 AVG(temperature) as avg_temperature,
-                MAX(timestamp) as latest_reading,
-                MIN(timestamp) as earliest_reading
+                MAX(unix_timestamp) as latest_reading,
+                MIN(unix_timestamp) as earliest_reading
             FROM flowmeter_readings
         "#)
         .fetch_one(&self.pool)
@@ -373,10 +378,10 @@ impl SqliteManager {
 
     // Database maintenance operations
     pub async fn cleanup_old_data(&self, days_to_keep: i64) -> Result<u64, ModbusError> {
-        let cutoff_date = Utc::now() - chrono::Duration::days(days_to_keep);
+        let cutoff_timestamp = (Utc::now() - chrono::Duration::days(days_to_keep)).timestamp();
         
-        let result = sqlx::query("DELETE FROM device_readings WHERE timestamp < ?")
-            .bind(cutoff_date)
+        let result = sqlx::query("DELETE FROM device_readings WHERE unix_timestamp < ?")
+            .bind(cutoff_timestamp)
             .execute(&self.pool)
             .await
             .map_err(|e| ModbusError::CommunicationError(format!("Failed to cleanup old data: {}", e)))?;
@@ -398,10 +403,12 @@ impl SqliteManager {
             .await
             .map_err(|e| ModbusError::CommunicationError(format!("Failed to get reading count: {}", e)))?;
 
+        let one_hour_ago = (Utc::now() - chrono::Duration::hours(1)).timestamp();
         let active_devices: i64 = sqlx::query_scalar(r#"
             SELECT COUNT(DISTINCT device_uuid) FROM device_readings 
-            WHERE timestamp > datetime('now', '-1 hour')
+            WHERE unix_timestamp > ?
         "#)
+        .bind(one_hour_ago)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| ModbusError::CommunicationError(format!("Failed to get active device count: {}", e)))?;

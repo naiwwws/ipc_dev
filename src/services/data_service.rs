@@ -478,7 +478,7 @@ impl DataService {
                         reading.volume_flow_rate,   // f32 with 3 decimal places
                         reading.error_code,
                         reading.quality_flag,
-                        reading.timestamp.format("%Y-%m-%d %H:%M:%S")
+                        reading.unix_timestamp
                     );
                 }
             } else {
@@ -510,7 +510,7 @@ impl DataService {
                 println!("Average Temperature: {:.2}", avg_temp);     // f32 with 2 decimal places
             }
             if let Some(latest) = stats.latest_reading {
-                println!("Latest Reading: {}", latest.format("%Y-%m-%d %H:%M:%S"));
+                println!("Latest Reading: {}", latest);
             }
         } else {
             println!("❌ Database service not enabled");

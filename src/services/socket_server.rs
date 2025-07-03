@@ -3,11 +3,12 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
 use crate::config::Config;
+use crate::devices::traits::DeviceData;
 use crate::storage::models::FlowmeterReading;
 use crate::utils::error::ModbusError;
 
@@ -74,51 +75,49 @@ impl SocketServer {
         Ok(())
     }
 
-    pub async fn send_flowmeter_data(&self, reading: &FlowmeterReading) -> Result<(), ModbusError> {
-        // Create JSON message with f32 precision
-        let message = serde_json::json!({
-            "type": "flowmeter_reading",
-            "timestamp": reading.timestamp.to_rfc3339(),
-            "device": {
-                "uuid": reading.device_uuid,
-                "address": reading.device_address,
-                "name": reading.device_name,
-                "location": reading.device_location,
-                "ipc_uuid": reading.ipc_uuid,
-                "site_id": reading.site_id,
-                "batch_id": reading.batch_id,
-            },
-            "measurements": {
-                "mass_flow_rate": reading.mass_flow_rate,      // f32
-                "density_flow": reading.density_flow,          // f32
-                "temperature": reading.temperature,            // f32
-                "volume_flow_rate": reading.volume_flow_rate,  // f32
-                "mass_total": reading.mass_total,              // f32
-                "volume_total": reading.volume_total,          // f32
-                "mass_inventory": reading.mass_inventory,      // f32
-                "volume_inventory": reading.volume_inventory,  // f32
-                "error_code": reading.error_code,
-                "quality_flag": reading.quality_flag
-            }
-        });
-
-        self.broadcast_message(&message).await?;
-        Ok(())
-    }
-
-    // UPDATE: Use raw float values instead of formatted strings
-    pub async fn send_device_data(&self, device_data: &dyn crate::devices::DeviceData) -> Result<(), ModbusError> {
-        // Create JSON message with raw float values
+    // Update send_device_data to use Unix timestamp
+    pub async fn send_device_data(&self, device_data: &dyn DeviceData) -> Result<(), ModbusError> {
+        // Create JSON message with Unix timestamp
         let message = serde_json::json!({
             "type": "device_data",
-            "timestamp": device_data.timestamp().to_rfc3339(),
+            "timestamp": device_data.unix_timestamp(), // Unix timestamp as i64
             "device": {
                 "type": device_data.device_type(),
                 "address": device_data.device_address(),
                 "name": device_data.device_name(),
                 "location": device_data.device_location()
             },
-            "data": device_data.get_parameters_as_floats() // Use raw floats
+            "data": device_data.get_parameters_as_floats()
+        });
+
+        self.broadcast_message(&message).await?;
+        Ok(())
+    }
+
+    // Update send_flowmeter_data to use Unix timestamp
+    pub async fn send_flowmeter_data(&self, reading: &FlowmeterReading) -> Result<(), ModbusError> {
+        // Create JSON message with Unix timestamp
+        let message = serde_json::json!({
+            "type": "flowmeter_reading",
+            "timestamp": reading.unix_timestamp, // Unix timestamp as i64
+            "device": {
+                "uuid": reading.device_uuid,
+                "address": reading.device_address,
+                "name": reading.device_name,
+                "location": reading.device_location
+            },
+            "measurements": {
+                "mass_flow_rate": reading.mass_flow_rate,
+                "density_flow": reading.density_flow,
+                "temperature": reading.temperature,
+                "volume_flow_rate": reading.volume_flow_rate,
+                "mass_total": reading.mass_total,
+                "volume_total": reading.volume_total,
+                "mass_inventory": reading.mass_inventory,
+                "volume_inventory": reading.volume_inventory,
+                "error_code": reading.error_code,
+                "quality_flag": reading.quality_flag
+            }
         });
 
         self.broadcast_message(&message).await?;

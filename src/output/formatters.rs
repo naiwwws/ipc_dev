@@ -86,7 +86,7 @@ impl DataFormatter for JsonFormatter {
             .collect();
         
         let result = serde_json::json!({
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": Utc::now().timestamp(),
             "devices": devices
         });
         
@@ -96,7 +96,7 @@ impl DataFormatter for JsonFormatter {
     fn format_parameter_data(&self, parameter: &str, values: &HashMap<u8, String>) -> String {
         let result = serde_json::json!({
             "parameter": parameter,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": Utc::now().timestamp(),
             "values": values
         });
         

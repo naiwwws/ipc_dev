@@ -23,6 +23,12 @@ pub trait DeviceData: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn device_address(&self) -> u8;
     fn timestamp(&self) -> DateTime<Utc>;
+    
+    // Add Unix timestamp method
+    fn unix_timestamp(&self) -> i64 {
+        self.timestamp().timestamp()
+    }
+    
     fn to_json(&self) -> Value;
     fn get_parameter(&self, name: &str) -> Option<String>;
     fn get_all_parameters(&self) -> Vec<(String, String)>;

@@ -170,7 +170,7 @@ pub async fn handle_subcommands(
                         format!("{:.4}", reading.density_flow),
                         format!("{:.3}", reading.volume_flow_rate),
                         reading.error_code,
-                        reading.timestamp.format("%H:%M:%S")
+                        reading.unix_timestamp
                     );
                 }
             } else {
