@@ -114,12 +114,11 @@ pub struct DatabaseOutputConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SqliteConfig {
     pub database_path: String,
-    pub max_connections: u32,
+    pub max_connections: usize,
     pub connection_timeout_seconds: u64,
     pub enable_wal: bool,
     pub cache_size: i32,
     pub auto_vacuum: bool,
-    // Add missing fields that sqlite_manager.rs expects
     pub batch_size: usize,
     pub busy_timeout_ms: u64,
     pub wal_mode: bool,
@@ -131,16 +130,16 @@ impl Default for SqliteConfig {
     fn default() -> Self {
         Self {
             database_path: "data/sensor_data.db".to_string(),
-            max_connections: 10,
+            max_connections: 5,
             connection_timeout_seconds: 30,
             enable_wal: false,
-            cache_size: 1000,
+            cache_size: 2000,
             auto_vacuum: true,
-            batch_size: 100,
+            batch_size: 500,
             busy_timeout_ms: 30000,
             wal_mode: false,
-            sync_mode: "NORMAL".to_string(),
-            cache_size_kb: 1000,
+            sync_mode: "OFF".to_string(),
+            cache_size_kb: 2000,
         }
     }
 }

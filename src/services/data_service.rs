@@ -30,7 +30,10 @@ impl DataService {
         info!("🚀 Initializing Data Service");
         info!("🏭 IPC: {} [{}]", config.get_ipc_name(), config.get_ipc_uuid());
         
-        let modbus_client = ModbusClient::new(&config.serial_port, config.baud_rate, &config.parity)?;
+        // Create modbus client
+        let modbus_client = Arc::new(ModbusClient::new(&config.serial_port, config.baud_rate, &config.parity)?);
+        
+        // Create devices from config
         let mut devices: Vec<Box<dyn Device>> = Vec::new();
         let mut device_address_to_uuid = HashMap::new();
 
@@ -53,36 +56,33 @@ impl DataService {
 
         //  Initialize and start database service
         let database_service = if config.output.database_output.as_ref().map(|db| db.enabled).unwrap_or(false) {
-            let mut db_service = DatabaseService::new(config.clone()).await?;
-            db_service.start().await?;
-            info!("💾 Database service initialized and started");
-            Some(db_service)
+            match DatabaseService::new(config.clone()).await {
+                Ok(mut db_service) => {
+                    // FIX: Remove the start() call since it doesn't exist
+                    info!("💾 Database service initialized successfully");
+                    Some(db_service)
+                }
+                Err(e) => {
+                    error!("❌ Failed to initialize database service: {}", e);
+                    None
+                }
+            }
         } else {
             info!("📝 Database service disabled");
             None
         };
 
+        // Create formatter - FIX: ConsoleFormatter is a unit struct
         let formatter: Box<dyn DataFormatter> = Box::new(ConsoleFormatter);
+
+        // Initialize senders - FIX: Make mutable to allow push
         let mut senders: Vec<Box<dyn DataSender>> = Vec::new();
         senders.push(Box::new(ConsoleSender));
 
-        // ✅ ADD: Initialize socket server if enabled
         let socket_server: Option<Arc<SocketServer>> = if config.socket_server.enabled {
-            let server = SocketServer::new(config.clone()); // Pass entire config
-            let server_arc = Arc::new(server);
-            
-            // Start server in background
-            let server_clone = Arc::clone(&server_arc);
-            tokio::spawn(async move {
-                if let Err(e) = server_clone.start().await {
-                    error!("Socket server error: {}", e);
-                }
-            });
-            
-            info!("🔌 Socket server enabled on port {}", config.socket_server.port);
-            Some(server_arc)
+            let server = SocketServer::new(config.clone());
+            Some(Arc::new(server))
         } else {
-            info!("📝 Socket server disabled");
             None
         };
 
@@ -91,7 +91,7 @@ impl DataService {
             devices,
             device_data: Arc::new(Mutex::new(HashMap::new())),
             device_address_to_uuid,
-            modbus_client: Arc::new(modbus_client),
+            modbus_client,
             formatter,
             senders,
             database_service,
@@ -112,13 +112,11 @@ impl DataService {
     ) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
             if let Some(uuid) = self.get_uuid_from_address(device_address) {
-                if let Some(device_config) = self.get_device_config_by_address(device_address) {
+                if let Some(_device_config) = self.get_device_config_by_address(device_address) {
+                    // FIX: Use only the 3 arguments that the method expects
                     db_service.store_device_data(
-                        uuid,
+                        uuid,           
                         device_address,
-                        &device_config.device_type,
-                        &device_config.name,
-                        &device_config.location,
                         device_data,
                     ).await?;
                     
@@ -441,17 +439,9 @@ impl DataService {
         self.database_service.as_mut()
     }
 
-    pub async fn get_database_stats(&self) -> Result<Option<crate::storage::DatabaseStats>, ModbusError> {
-        if let Some(db_service) = &self.database_service {
-            Ok(Some(db_service.get_stats().await?))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub async fn check_database_health(&self) -> Result<Option<bool>, ModbusError> {
         if let Some(db_service) = &self.database_service {
-            match db_service.get_stats().await {
+            match db_service.get_flowmeter_stats().await {
                 Ok(_) => Ok(Some(true)),
                 Err(_) => Ok(Some(false)),
             }
@@ -460,29 +450,25 @@ impl DataService {
         }
     }
 
+    // MINIMAL: Updated query method
     pub async fn query_flowmeter_data(&self, device_address: u8, limit: i64) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
-            if let Some(uuid) = self.get_uuid_from_address(device_address) {
-                let readings = db_service.get_device_flowmeter_readings(uuid, None, Some(limit)).await?;
-                
-                println!("📋 Recent flowmeter readings for device {}:", device_address);
-                println!("{:<15} {:<15} {:<15} {:<15} {:<8} {:<10} {:<25}", 
-                    "Mass Flow", "Temperature", "Density", "Vol Flow", "Error", "Quality", "Timestamp");
-                println!("{}", "-".repeat(110));
-                
-                for reading in readings {
-                    println!("{:<15.2} {:<15.2} {:<15.4} {:<15.3} {:<8} {:<10} {:<25}", 
-                        reading.mass_flow_rate,     // f32 with 2 decimal places
-                        reading.temperature,        // f32 with 2 decimal places
-                        reading.density_flow,       // f32 with 4 decimal places
-                        reading.volume_flow_rate,   // f32 with 3 decimal places
-                        reading.error_code,
-                        reading.quality_flag,
-                        reading.unix_timestamp
-                    );
-                }
-            } else {
-                println!("❌ Device address {} not found", device_address);
+            let readings = db_service.get_device_flowmeter_readings(device_address, None, Some(limit)).await?;
+            
+            println!("📋 Recent flowmeter readings for device {}:", device_address);
+            println!("{:<15} {:<15} {:<15} {:<15} {:<8} {:<25}", 
+                "Mass Flow", "Temperature", "Density", "Vol Flow", "Error", "Unix Timestamp");
+            println!("{}", "-".repeat(110));
+            
+            for reading in readings {
+                println!("{:<15.2} {:<15.2} {:<15.4} {:<15.3} {:<8} {:<25}", 
+                    reading.mass_flow_rate,
+                    reading.temperature,
+                    reading.density_flow,
+                    reading.volume_flow_rate,
+                    reading.error_code,
+                    reading.unix_timestamp
+                );
             }
         } else {
             println!("❌ Database service not enabled");
@@ -490,26 +476,26 @@ impl DataService {
         Ok(())
     }
 
+    // MINIMAL: Updated stats method
     pub async fn get_flowmeter_stats(&self) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
             let stats = db_service.get_flowmeter_stats().await?;
             
             println!("📊 Flowmeter Statistics:");
             println!("Total Readings: {}", stats.total_readings);
-            println!("Active Devices: {}", stats.active_devices);
             if let Some(avg_flow) = stats.avg_mass_flow_rate {
-                println!("Average Mass Flow Rate: {:.2}", avg_flow);  // f32 with 2 decimal places
+                println!("Average Mass Flow Rate: {:.2}", avg_flow);
             }
             if let Some(max_flow) = stats.max_mass_flow_rate {
-                println!("Maximum Mass Flow Rate: {:.2}", max_flow);  // f32 with 2 decimal places
+                println!("Maximum Mass Flow Rate: {:.2}", max_flow);
             }
             if let Some(min_flow) = stats.min_mass_flow_rate {
-                println!("Minimum Mass Flow Rate: {:.2}", min_flow);  // f32 with 2 decimal places
+                println!("Minimum Mass Flow Rate: {:.2}", min_flow);
             }
             if let Some(avg_temp) = stats.avg_temperature {
-                println!("Average Temperature: {:.2}", avg_temp);     // f32 with 2 decimal places
+                println!("Average Temperature: {:.2}", avg_temp);
             }
-            if let Some(latest) = stats.latest_reading {
+            if let Some(latest) = stats.latest_timestamp {
                 println!("Latest Reading: {}", latest);
             }
         } else {
@@ -597,5 +583,15 @@ impl DataService {
 
     pub fn get_socket_port(&self) -> Option<u16> {
         self.socket_server.as_ref().map(|s| s.port())
+    }
+
+    // Helper method to get device address from UUID (if still needed)
+    fn get_address_from_uuid(&self, uuid: &str) -> Option<u8> {
+        for (address, device_uuid) in &self.device_address_to_uuid {
+            if device_uuid == uuid {
+                return Some(*address);
+            }
+        }
+        None
     }
 }

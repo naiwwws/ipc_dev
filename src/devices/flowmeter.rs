@@ -186,7 +186,7 @@ impl DeviceData for FlowmeterData {
         self.timestamp
     }
     
-    fn unix_timestamp(&self) -> i64 {
+    fn unix_ts(&self) -> i64 {
         self.timestamp.timestamp()
     }
 

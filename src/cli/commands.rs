@@ -132,10 +132,12 @@ pub async fn handle_subcommands(
     //  ADD: Handle flowmeter commands
     if let Some(matches) = matches.subcommand_matches("flowmeter") {
         if let Some(sub_matches) = matches.subcommand_matches("query") {
+            // Update flowmeter query command
             info!("📋 Executing flowmeter query command...");
             
             let device_address: u8 = sub_matches.get_one::<String>("device").unwrap().parse()
                 .map_err(|_| anyhow!("Invalid device address"))?;
+                
             let limit: i64 = sub_matches.get_one::<String>("limit").unwrap_or(&"10".to_string()).parse()
                 .map_err(|_| anyhow!("Invalid limit"))?;
                 
@@ -150,6 +152,7 @@ pub async fn handle_subcommands(
         }
         
         if let Some(sub_matches) = matches.subcommand_matches("recent") {
+            // Update recent command  
             info!("📋 Executing flowmeter recent command...");
             
             let limit: i64 = sub_matches.get_one::<String>("limit").unwrap_or(&"20".to_string()).parse()
@@ -159,22 +162,22 @@ pub async fn handle_subcommands(
                 let readings = db_service.get_recent_flowmeter_readings(limit).await?;
                 
                 println!("📋 Recent flowmeter readings (last {}):", limit);
-                println!("{:<12} {:<12} {:<12} {:<12} {:<8} {:<25}", 
-                    "Mass Flow", "Temperature", "Density", "Vol Flow", "Error", "Timestamp");
+                println!("{:<12} {:<12} {:<12} {:<12} {:<8} {:<15}", 
+                    "Mass Flow", "Temperature", "Density", "Vol Flow", "Error", "Unix Time");
                 println!("{}", "-".repeat(80));
                 
                 for reading in readings {
-                    println!("{:<12} {:<12} {:<12} {:<12} {:<8} {:<25}", 
-                        format!("{:.2}", reading.mass_flow_rate),
-                        format!("{:.1}", reading.temperature),
-                        format!("{:.4}", reading.density_flow),
-                        format!("{:.3}", reading.volume_flow_rate),
+                    println!("{:<12.2} {:<12.2} {:<12.4} {:<12.3} {:<8} {:<15}", 
+                        reading.mass_flow_rate,
+                        reading.temperature,
+                        reading.density_flow,
+                        reading.volume_flow_rate,
                         reading.error_code,
                         reading.unix_timestamp
                     );
                 }
             } else {
-                println!("❌ Database service not available");
+                println!("❌ Database service not enabled");
             }
             return Ok(true);
         }
