@@ -249,7 +249,15 @@ impl DataService {
         
         // Send to output formatters
         if !all_data.is_empty() {
-            let formatted_data = self.formatter.format(&all_data.iter().map(|d| d.as_ref()).collect::<Vec<_>>());
+            let formatted_data = all_data.iter()
+                .map(|data| {
+                    let device = self.devices.iter()
+                        .find(|d| self.device_address_to_uuid.get(&d.address()).is_some())
+                        .unwrap_or(&self.devices[0]);
+                    self.formatter.format_single_device(device.address(), data.as_ref())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             
             for sender in &self.senders {
                 if let Err(e) = sender.send(&formatted_data).await {
@@ -434,9 +442,11 @@ impl DataService {
     //  CLI interface methods
     pub fn set_formatter(&mut self, formatter: Box<dyn DataFormatter>) {
         self.formatter = formatter;
+        info!("🎨 Output formatter changed to: {}", self.formatter.formatter_type());
     }
 
     pub fn add_sender(&mut self, sender: Box<dyn DataSender>) {
+        info!("📡 Adding output sender: {}", sender.sender_type());
         self.senders.push(sender);
     }
 

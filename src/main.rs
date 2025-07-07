@@ -5,10 +5,10 @@ mod modbus;
 mod devices;
 mod utils;
 mod output;
-mod storage; // Add this line
+mod storage;
 
 use anyhow::Result;
-use clap::{Arg, Command};
+use clap::{Arg, Command, ArgMatches}; // Add ArgMatches import
 use log::info;
 
 use services::DataService;
@@ -304,7 +304,6 @@ fn build_cli() -> Command {
                 .subcommand(Command::new("status").about("Show WebSocket server status"))
                 .subcommand(Command::new("clients").about("Show connected WebSocket clients"))
         )
-        .get_matches();
 }
 
 fn apply_websocket_config(matches: &ArgMatches, config: &mut Config) {
@@ -329,7 +328,7 @@ fn apply_websocket_config(matches: &ArgMatches, config: &mut Config) {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
-    let matches = build_cli();
+    let matches = build_cli().get_matches(); 
 
     // Handle config commands FIRST, before creating the service
     if let Some(config_matches) = matches.subcommand_matches("config") {
@@ -395,12 +394,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("🔌 Socket server will start on port {}", config.socket_server.port);
     }
 
-    // ADD: Apply WebSocket configuration
+    // Apply WebSocket configuration
     apply_websocket_config(&matches, &mut config);
     
     let mut service = DataService::new(config.clone()).await?;
 
-    // ADD: Handle WebSocket commands before other subcommands
+    // Handle WebSocket commands before other subcommands
     if handle_websocket_commands(&matches, &service).await? {
         return Ok(());
     }
