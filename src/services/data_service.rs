@@ -1,4 +1,4 @@
-use log::{error, info, warn};
+use log::{error, info, warn, debug};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, interval, Duration};
@@ -141,7 +141,7 @@ impl DataService {
         self.device_address_to_uuid.get(&address)
     }
 
-    //  Fixed run method - use send_device_data instead of broadcast_device_data
+    //  Main continuous monitoring method
     pub async fn run(&self, debug_output: bool) -> Result<(), ModbusError> {
         info!("🚀 Starting continuous monitoring");
         
@@ -169,6 +169,7 @@ impl DataService {
 
         let interval_duration = tokio::time::Duration::from_secs(self.config.update_interval_seconds);
         let mut interval = tokio::time::interval(interval_duration);
+        let start_time = std::time::Instant::now();
 
         loop {
             interval.tick().await;
@@ -194,12 +195,12 @@ impl DataService {
                             error!("❌ Failed to store device {} data to database: {}", addr, e);
                         }
                         
-                        // Send to WebSocket clients if enabled
+                        // Send to WebSocket clients via /flowmeter/read endpoint
                         if let Some(ws_server) = &self.websocket_server {
                             if let Err(e) = ws_server.send_device_data(data.as_ref()).await {
                                 error!("❌ Failed to send data to WebSocket clients: {}", e);
                             } else {
-                                println!("📡 Sent data from device {} to WebSocket clients", addr);
+                                debug!("📡 Sent flowmeter data from device {} to /flowmeter/read endpoint", addr);
                             }
                         }
                         
@@ -210,7 +211,42 @@ impl DataService {
                     }
                 }
             }
+
+            // Periodically send system status (every 10 cycles)
+            if let Some(ws_server) = &self.websocket_server {
+                let cycle_count = start_time.elapsed().as_secs() / self.config.update_interval_seconds;
+                if cycle_count % 10 == 0 {
+                    let uptime = start_time.elapsed().as_secs();
+                    if let Err(e) = ws_server.send_system_status(self.devices.len(), uptime).await {
+                        error!("❌ Failed to send system status: {}", e);
+                    }
+                }
+            }
         }
+    }
+
+    // Add method to trigger flowmeter readings via WebSocket
+    pub async fn trigger_flowmeter_readings_via_websocket(&self) -> Result<(), ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            if let Some(ws_server) = &self.websocket_server {
+                let readings = db_service.get_recent_flowmeter_readings(20).await?;
+                ws_server.send_flowmeter_readings(readings).await?;
+                info!("📡 Sent recent flowmeter readings via WebSocket");
+            }
+        }
+        Ok(())
+    }
+
+    // Add method to send flowmeter stats via WebSocket
+    pub async fn send_flowmeter_stats_via_websocket(&self) -> Result<(), ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            if let Some(ws_server) = &self.websocket_server {
+                let stats = db_service.get_flowmeter_stats().await?;
+                ws_server.send_flowmeter_stats(stats).await?;
+                info!("📊 Sent flowmeter statistics via WebSocket");
+            }
+        }
+        Ok(())
     }
 
     //  Fixed read_all_devices_once method
@@ -523,7 +559,7 @@ impl DataService {
         Ok(())
     }
 
-    // ✅ UPDATE: Add socket broadcasting to run method (around line 140)
+    // Socket-based communication method
     pub async fn run_socket(&self, debug_output: bool) -> Result<(), ModbusError> {
         info!("🚀 Starting continuous monitoring");
         if self.database_service.is_some() {

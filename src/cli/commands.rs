@@ -204,11 +204,14 @@ pub async fn handle_websocket_commands(
                 println!("  Port: {}", port);
                 println!("  Status: RUNNING");
                 println!("  Connected Clients: {}", client_count);
+                println!("  Streaming Endpoint: /flowmeter/read");
+                
                 if let Some(stats) = service.get_websocket_client_stats().await {
                     println!("  Client Details:");
                     for (client_id, info) in stats {
                         println!("    - {}: {} messages sent, {} bytes sent", 
                                 client_id, info.messages_sent, info.bytes_sent);
+                        println!("      Subscribed to: {:?}", info.subscribed_endpoints);
                     }
                 }
             } else {
@@ -216,6 +219,7 @@ pub async fn handle_websocket_commands(
             }
             return Ok(true);
         }
+        
         if let Some(_) = matches.subcommand_matches("clients") {
             if let Some(stats) = service.get_websocket_client_stats().await {
                 println!("🔌 Connected WebSocket Clients ({}):", stats.len());
@@ -224,6 +228,7 @@ pub async fn handle_websocket_commands(
                     println!("    Connected: {}", info.connected_at.format("%Y-%m-%d %H:%M:%S UTC"));
                     println!("    Messages: {}", info.messages_sent);
                     println!("    Bytes: {}", info.bytes_sent);
+                    println!("    Subscriptions: {:?}", info.subscribed_endpoints);
                     println!();
                 }
             } else {
@@ -231,6 +236,19 @@ pub async fn handle_websocket_commands(
             }
             return Ok(true);
         }
+        
+        if let Some(_) = matches.subcommand_matches("send-readings") {
+            service.trigger_flowmeter_readings_via_websocket().await?;
+            println!("📡 Triggered flowmeter readings broadcast to WebSocket clients");
+            return Ok(true);
+        }
+        
+        if let Some(_) = matches.subcommand_matches("send-stats") {
+            service.send_flowmeter_stats_via_websocket().await?;
+            println!("📊 Triggered flowmeter statistics broadcast to WebSocket clients");
+            return Ok(true);
+        }
     }
+    
     Ok(false)
 }
