@@ -115,7 +115,7 @@ impl DataService {
             None
         };
 
-        // Create the DataService instance
+        // Create the DataService instance FIRST
         let data_service = Self {
             config,
             devices,
@@ -128,9 +128,8 @@ impl DataService {
             websocket_server,
         };
         
-        // ALTERNATIVE APPROACH: Use Arc instead of cloning the entire service
-        let data_service_arc = Arc::new(data_service);
-        let data_service_clone = Arc::clone(&data_service_arc);
+        // FIX: Clone data_service for the spawned task instead of moving it into Arc
+        let data_service_clone = data_service.clone();
         
         // Spawn a task to handle WebSocket requests
         tokio::spawn(async move {
@@ -139,6 +138,16 @@ impl DataService {
                     WebSocketRequest::ReadFlowmeter { client_id, device_address, request_id } => {
                         if let Err(e) = data_service_clone.handle_flowmeter_read_request(client_id, device_address, request_id).await {
                             error!("Error handling flowmeter read request: {}", e);
+                        }
+                    },
+                    WebSocketRequest::StartStreaming { client_id, device_address, request_id } => {
+                        if let Err(e) = data_service_clone.handle_start_streaming_request(client_id, device_address, request_id).await {
+                            error!("Error handling start streaming request: {}", e);
+                        }
+                    },
+                    WebSocketRequest::StopStreaming { client_id, request_id } => {
+                        if let Err(e) = data_service_clone.handle_stop_streaming_request(client_id, request_id).await {
+                            error!("Error handling stop streaming request: {}", e);
                         }
                     },
                     WebSocketRequest::GetRecentReadings { client_id, limit, request_id } => {
@@ -155,9 +164,8 @@ impl DataService {
             }
         });
         
-        // Return the Arc-wrapped service, but we need to extract it
-        // Since we can't return Arc<DataService> from this function, we'll use a different approach
-        Ok(Arc::try_unwrap(data_service_arc).unwrap_or_else(|arc| (*arc).clone()))
+        // FIX: Return the original data_service, not Arc
+        Ok(data_service)
     }
 
     // Handler methods for WebSocket requests (KEEP ONLY ONE SET)
@@ -331,6 +339,55 @@ impl DataService {
                 ws_server.send_to_client(&client_id, &error_response).await?;
             }
             return Err(ModbusError::ServiceNotAvailable("Database service not available".to_string()));
+        }
+        
+        Ok(())
+    }
+
+    //  Handler methods for WebSocket requests (NEW: ADD MISSING METHODS)
+    async fn handle_start_streaming_request(
+        &self,
+        client_id: String,
+        device_address: Option<u8>,
+        request_id: String
+    ) -> Result<(), ModbusError> {
+        info!("🎬 Starting streaming for client {} (device: {:?})", client_id, device_address);
+        
+        if let Some(ws_server) = &self.websocket_server {
+            let response = json!({
+                "endpoint": "/flowmeter/read",
+                "status": "streaming_confirmed",
+                "message": "Streaming started. Real-time data will be sent automatically.",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "streaming": true,
+                "device_filter": device_address,
+                "id": request_id
+            });
+            
+            ws_server.send_to_client(&client_id, &response).await?;
+        }
+        
+        Ok(())
+    }
+
+    async fn handle_stop_streaming_request(
+        &self,
+        client_id: String,
+        request_id: String
+    ) -> Result<(), ModbusError> {
+        info!("🛑 Stopping streaming for client {}", client_id);
+        
+        if let Some(ws_server) = &self.websocket_server {
+            let response = json!({
+                "endpoint": "/flowmeter/stop",
+                "status": "streaming_stopped_confirmed",
+                "message": "Streaming stopped successfully.",
+                "timestamp": chrono::Utc::now().timestamp(),
+                "streaming": false,
+                "id": request_id
+            });
+            
+            ws_server.send_to_client(&client_id, &response).await?;
         }
         
         Ok(())
