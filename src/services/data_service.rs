@@ -8,7 +8,8 @@ use crate::modbus::ModbusClient;
 use crate::devices::{Device, DeviceData, FlowmeterDevice};
 use crate::output::{DataFormatter, DataSender, ConsoleFormatter, ConsoleSender};
 use crate::output::raw_sender::{RawDataSender, RawDataFormat};
-use crate::services::{DatabaseService, SocketServer};
+use crate::services::DatabaseService;
+use crate::services::socket_server::WebSocketServer; // Update import
 use crate::utils::error::ModbusError;
 
 pub struct DataService {
@@ -22,7 +23,7 @@ pub struct DataService {
     database_service: Option<DatabaseService>,
 
     // ✅ ADD: Socket server
-    socket_server: Option<Arc<SocketServer>>,
+    websocket_server: Option<Arc<WebSocketServer>>, // Changed from socket_server
 }
 
 impl DataService {
@@ -79,8 +80,8 @@ impl DataService {
         let mut senders: Vec<Box<dyn DataSender>> = Vec::new();
         senders.push(Box::new(ConsoleSender));
 
-        let socket_server: Option<Arc<SocketServer>> = if config.socket_server.enabled {
-            let server = SocketServer::new(config.clone());
+        let websocket_server: Option<Arc<WebSocketServer>> = if config.socket_server.enabled {
+            let server = WebSocketServer::new(config.clone());
             Some(Arc::new(server))
         } else {
             None
@@ -95,7 +96,7 @@ impl DataService {
             formatter,
             senders,
             database_service,
-            socket_server,
+            websocket_server,
         })
     }
 
@@ -145,7 +146,7 @@ impl DataService {
             info!("📝 Database storage: DISABLED");
         }
         
-        if self.socket_server.is_some() {
+        if self.websocket_server.is_some() {
             info!("🔌 Socket streaming: ENABLED");
         } else {
             info!("📝 Socket streaming: DISABLED");
@@ -176,12 +177,8 @@ impl DataService {
                         }
                         
                         // FIX: Use send_device_data instead of broadcast_device_data
-                        if let Some(socket_server) = &self.socket_server {
-                            if let Err(e) = socket_server.send_device_data(data.as_ref()).await {
-                                error!("❌ Failed to send data to socket clients: {}", e);
-                            } else {
-                                info!("📡 Sent data from device {} to socket clients", addr);
-                            }
+                        if let Some(ws_server) = &self.websocket_server {
+                            ws_server.send_device_data(data.as_ref()).await.ok();
                         }
                         
                         info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
@@ -513,7 +510,7 @@ impl DataService {
             info!("📝 Database storage: DISABLED");
         }
         
-        if self.socket_server.is_some() {
+        if self.websocket_server.is_some() {
             info!("🔌 Socket streaming: ENABLED");
         } else {
             info!("📝 Socket streaming: DISABLED");
@@ -544,12 +541,8 @@ impl DataService {
                         }
                         
                         // FIX: Use send_device_data instead of broadcast_device_data
-                        if let Some(socket_server) = &self.socket_server {
-                            if let Err(e) = socket_server.send_device_data(data.as_ref()).await {
-                                error!("❌ Failed to send data to socket clients: {}", e);
-                            } else {
-                                info!("📡 Sent data from device {} to socket clients", addr);
-                            }
+                        if let Some(ws_server) = &self.websocket_server {
+                            ws_server.send_device_data(data.as_ref()).await.ok();
                         }
                         
                         info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
@@ -572,17 +565,9 @@ impl DataService {
         }
     }
 
-    // ✅ ADD: Socket management methods
-    pub async fn get_socket_client_stats(&self) -> Option<HashMap<String, crate::services::socket_server::ClientInfo>> {
-        if let Some(socket_server) = &self.socket_server {
-            Some(socket_server.get_client_stats().await)
-        } else {
-            None
-        }
-    }
 
     pub fn get_socket_port(&self) -> Option<u16> {
-        self.socket_server.as_ref().map(|s| s.port())
+        self.websocket_server.as_ref().map(|s| s.port())
     }
 
     // Helper method to get device address from UUID (if still needed)
