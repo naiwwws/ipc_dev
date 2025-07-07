@@ -26,7 +26,7 @@ pub struct DataService {
     senders: Vec<Box<dyn DataSender>>,
     database_service: Option<DatabaseService>,
     websocket_server: Option<Arc<WebSocketServer>>,
-    // ADD: Fields to track streaming state
+    // ADD: Missing streaming state fields
     streaming_clients: Arc<TokioMutex<usize>>,
     polling_handle: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
 }
@@ -912,12 +912,10 @@ impl DataService {
 
     // ADD THIS METHOD: Implementation of the missing start_polling_loop
     async fn start_polling_loop(service: Arc<DataService>) {
-        info!("🔄 Starting device polling loop");
-        
-        // Get polling interval from config
         let interval_duration = tokio::time::Duration::from_secs(service.config.update_interval_seconds);
         let mut interval = tokio::time::interval(interval_duration);
-        let start_time = std::time::Instant::now();
+
+        info!("🔄 Started flowmeter polling loop");
 
         loop {
             interval.tick().await;
@@ -931,6 +929,7 @@ impl DataService {
                 }
             }
             
+            // Read from all devices
             for device in &service.devices {
                 let addr = device.address();
                 
@@ -946,41 +945,38 @@ impl DataService {
                         // Store to database if enabled
                         if let Some(db_service) = &service.database_service {
                             if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
-                                if let Err(e) = db_service.store_device_data(
-                                    uuid,
-                                    addr,
-                                    data.as_ref(),
-                                ).await {
-                                    error!("❌ Failed to store device {} data to database: {}", addr, e);
+                                if let Err(e) = db_service.store_device_data(uuid, addr, data.as_ref()).await {
+                                    error!("❌ Failed to store device {} data: {}", addr, e);
                                 }
                             }
                         }
                         
                         // Send to WebSocket clients
                         if let Some(ws_server) = &service.websocket_server {
-                            if let Err(e) = ws_server.send_device_data(data.as_ref()).await {
-                                debug!("📡 WebSocket error: {}", e);
+                            // Create flowmeter data message
+                            let message = json!({
+                                "endpoint": "/flowmeter/read",
+                                "type": "flowmeter_data",
+                                "device_address": addr,
+                                "device_name": device.name(),
+                                "timestamp": chrono::Utc::now().timestamp(),
+                                "data": data.get_parameters_as_floats()
+                            });
+                            
+                            if let Err(e) = ws_server.broadcast_to_endpoint("/flowmeter/read", &message).await {
+                                error!("❌ Failed to send data to WebSocket clients: {}", e);
+                            } else {
+                                debug!("📡 Sent flowmeter data from device {} to clients", addr);
                             }
                         }
-                        
-                        debug!("✅ Read data from device {} ({})", addr, device.name());
                     }
                     Err(e) => {
                         error!("❌ Failed to read from device {} ({}): {}", addr, device.name(), e);
                     }
                 }
             }
-
-            // Send system status occasionally (every ~10 cycles)
-            let cycle_count = start_time.elapsed().as_secs() / service.config.update_interval_seconds;
-            if cycle_count % 10 == 0 && cycle_count > 0 {
-                if let Some(ws_server) = &service.websocket_server {
-                    let uptime = start_time.elapsed().as_secs();
-                    if let Err(e) = ws_server.send_system_status(service.devices.len(), uptime).await {
-                        debug!("📡 Failed to send system status: {}", e);
-                    }
-                }
-            }
         }
+        
+        info!("🛑 Polling loop stopped");
     }
 }
