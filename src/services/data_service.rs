@@ -34,20 +34,23 @@ pub struct DataService {
 // KEEP: Clone implementation ABOVE the main impl block (this one is correct)
 impl Clone for DataService {
     fn clone(&self) -> Self {
-        // FIX: Clone devices properly instead of creating empty Vec
+        // Create new devices vector by recreating them from config
         let mut cloned_devices: Vec<Box<dyn Device>> = Vec::new();
-        for device in &self.devices {
-            // Create new FlowmeterDevice instances from the existing ones
-            let flowmeter = FlowmeterDevice::new(
-                device.address(),
-                device.name().to_string(),
-            );
-            cloned_devices.push(Box::new(flowmeter));
+        
+        // Only clone devices if we have the config available
+        for device_config in &self.config.devices {
+            if device_config.enabled {
+                let device = FlowmeterDevice::new(
+                    device_config.address,
+                    device_config.name.clone(),
+                );
+                cloned_devices.push(Box::new(device));
+            }
         }
 
         Self {
             config: self.config.clone(),
-            devices: cloned_devices, // FIX: Use properly cloned devices
+            devices: cloned_devices, // Use properly cloned devices
             device_data: self.device_data.clone(),
             device_address_to_uuid: self.device_address_to_uuid.clone(),
             modbus_client: self.modbus_client.clone(),
@@ -55,7 +58,6 @@ impl Clone for DataService {
             senders: Vec::new(),
             database_service: self.database_service.clone(),
             websocket_server: self.websocket_server.clone(),
-            // ADD: Clone new fields
             streaming_clients: self.streaming_clients.clone(),
             polling_handle: self.polling_handle.clone(),
         }
@@ -115,21 +117,25 @@ impl DataService {
         let mut senders: Vec<Box<dyn DataSender>> = Vec::new();
         senders.push(Box::new(ConsoleSender));
 
-        // Create a channel for WebSocket server requests
-        let (ws_tx, mut ws_rx) = mpsc::channel::<WebSocketRequest>(100);
-        
-        // Initialize WebSocket server if enabled and mode is websocket
-        let websocket_server: Option<Arc<WebSocketServer>> = if config.socket_server.enabled 
-            && config.socket_server.mode == "websocket" {
-            let mut server = WebSocketServer::new(config.clone());
-            // Set the sender channel
-            server.set_data_service_channel(ws_tx.clone());
-            info!("🔌 WebSocket server initialized on port {}", server.port());
-            Some(Arc::new(server))
-        } else if config.socket_server.enabled {
-            info!("📡 Socket server mode: {}", config.socket_server.mode);
-            None
+        // Create WebSocket server if enabled
+        let websocket_server = if config.socket_server.enabled {
+            info!("🔌 Initializing WebSocket server on port {}", config.socket_server.port);
+            let mut ws_server = WebSocketServer::new(config.clone());
+            
+            // Create channel for WebSocket-DataService communication
+            let (ws_tx, ws_rx) = mpsc::channel::<WebSocketRequest>(100);
+            
+            // Set the channel in WebSocket server
+            ws_server.set_data_service_channel(ws_tx);
+            
+            let ws_server_arc = Arc::new(ws_server);
+            
+            // Store the receiver for later use
+            // We'll need to start the request handler in run() method
+            
+            Some((ws_server_arc, ws_rx))
         } else {
+            info!("📝 WebSocket server disabled in config");
             None
         };
 
@@ -143,49 +149,19 @@ impl DataService {
             formatter,
             senders,
             database_service,
-            websocket_server,
-            // ADD: Initialize streaming state
+            websocket_server: websocket_server.as_ref().map(|(server, _)| server.clone()),
             streaming_clients: Arc::new(TokioMutex::new(0)),
             polling_handle: Arc::new(TokioMutex::new(None)),
         };
-        
-        // FIX: Clone data_service for the spawned task instead of moving it into Arc
-        let data_service_clone = data_service.clone();
-        
-        // Spawn a task to handle WebSocket requests
-        tokio::spawn(async move {
-            while let Some(request) = ws_rx.recv().await {
-                match request {
-                    WebSocketRequest::ReadFlowmeter { client_id, device_address, request_id } => {
-                        if let Err(e) = data_service_clone.handle_flowmeter_read_request(client_id, device_address, request_id).await {
-                            error!("Error handling flowmeter read request: {}", e);
-                        }
-                    },
-                    WebSocketRequest::StartStreaming { client_id, device_address, request_id } => {
-                        if let Err(e) = data_service_clone.handle_start_streaming_request(client_id, device_address, request_id).await {
-                            error!("Error handling start streaming request: {}", e);
-                        }
-                    },
-                    WebSocketRequest::StopStreaming { client_id, request_id } => {
-                        if let Err(e) = data_service_clone.handle_stop_streaming_request(client_id, request_id).await {
-                            error!("Error handling stop streaming request: {}", e);
-                        }
-                    },
-                    WebSocketRequest::GetRecentReadings { client_id, limit, request_id } => {
-                        if let Err(e) = data_service_clone.handle_recent_readings_request(client_id, limit, request_id).await {
-                            error!("Error handling recent readings request: {}", e);
-                        }
-                    },
-                    WebSocketRequest::GetStats { client_id, request_id } => {
-                        if let Err(e) = data_service_clone.handle_stats_request(client_id, request_id).await {
-                            error!("Error handling stats request: {}", e);
-                        }
-                    },
-                }
-            }
-        });
-        
-        // FIX: Return the original data_service, not Arc
+
+        // Start WebSocket request handler if WebSocket is enabled
+        if let Some((_, ws_rx)) = websocket_server {
+            let data_service_clone = data_service.clone();
+            tokio::spawn(async move {
+                data_service_clone.start_websocket_request_handler(ws_rx).await;
+            });
+        }
+
         Ok(data_service)
     }
 
@@ -420,24 +396,36 @@ impl DataService {
         client_id: String,
         request_id: String
     ) -> Result<(), ModbusError> {
-        info!("🛑 Stopping streaming for client {}", client_id);
+        info!("🛑 Processing stop streaming request for client {}", client_id);
         
         // Decrement streaming clients counter and stop polling if no clients left
-        {
+        let should_stop_polling = {
             let mut count = self.streaming_clients.lock().await;
             
             if *count > 0 {
                 *count -= 1;
+                info!("📡 Decremented streaming client count to {}", *count);
                 
                 if *count == 0 {
-                    // Last client stopped streaming, abort the polling task
-                    if let Some(handle) = self.polling_handle.lock().await.take() {
-                        handle.abort();
-                        info!("⏹️ Stopped polling loop (no streaming clients)");
-                    }
+                    info!("⏹️ No more streaming clients - will stop polling loop");
+                    true
                 } else {
-                    info!("📡 Removed streaming client (remaining: {})", *count);
+                    info!("📡 Still have {} streaming clients - keeping polling active", *count);
+                    false
                 }
+            } else {
+                warn!("⚠️ Received stop request but streaming count was already 0");
+                false
+            }
+        };
+    
+        // Stop polling if this was the last client
+        if should_stop_polling {
+            if let Some(handle) = self.polling_handle.lock().await.take() {
+                handle.abort();
+                info!("✅ Successfully stopped polling loop (no streaming clients)");
+            } else {
+                warn!("⚠️ No polling handle found to stop");
             }
         }
         
@@ -445,7 +433,7 @@ impl DataService {
         if let Some(ws_server) = &self.websocket_server {
             let response = json!({
                 "endpoint": "/flowmeter/stop",
-                "status": "streaming_stopped_confirmed",
+                "status": "streaming_stopped",
                 "message": "Streaming stopped successfully.",
                 "timestamp": chrono::Utc::now().timestamp(),
                 "streaming": false,
@@ -453,6 +441,7 @@ impl DataService {
             });
             
             ws_server.send_to_client(&client_id, &response).await?;
+            info!("📤 Sent stop confirmation to client {}", client_id);
         }
         
         Ok(())
@@ -989,5 +978,92 @@ impl DataService {
         }
         
         info!("🛑 Polling loop stopped");
+    }
+
+    // ADD: Method to handle WebSocket requests (this is missing!)
+    pub async fn handle_websocket_request(&self, request: WebSocketRequest) -> Result<(), ModbusError> {
+        match request {
+            WebSocketRequest::StartStreaming { client_id, device_address, request_id } => {
+                self.handle_start_streaming_request(client_id, device_address, request_id).await
+            }
+            WebSocketRequest::StopStreaming { client_id, request_id } => {
+                self.handle_stop_streaming_request(client_id, request_id).await
+            }
+            WebSocketRequest::ReadFlowmeter { client_id, device_address, request_id } => {
+                self.handle_flowmeter_read_request(client_id, device_address, request_id).await
+            }
+            WebSocketRequest::GetRecentReadings { client_id, limit, request_id } => {
+                // Handle recent readings request
+                if let Some(db_service) = &self.database_service {
+                    if let Some(ws_server) = &self.websocket_server {
+                        match db_service.get_recent_flowmeter_readings(limit).await {
+                            Ok(readings) => {
+                                let response = json!({
+                                    "endpoint": "/flowmeter/recent",
+                                    "status": "success",
+                                    "data": readings,
+                                    "count": readings.len(),
+                                    "timestamp": chrono::Utc::now().timestamp(),
+                                    "id": request_id
+                                });
+                                ws_server.send_to_client(&client_id, &response).await?;
+                            }
+                            Err(e) => {
+                                let error_response = json!({
+                                    "endpoint": "/flowmeter/recent",
+                                    "status": "error",
+                                    "error": format!("Database error: {}", e),
+                                    "id": request_id
+                                });
+                                ws_server.send_to_client(&client_id, &error_response).await?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            WebSocketRequest::GetStats { client_id, request_id } => {
+                // Handle stats request
+                if let Some(db_service) = &self.database_service {
+                    if let Some(ws_server) = &self.websocket_server {
+                        match db_service.get_flowmeter_stats().await {
+                            Ok(stats) => {
+                                let response = json!({
+                                    "endpoint": "/flowmeter/stats",
+                                    "status": "success",
+                                    "data": stats,
+                                    "timestamp": chrono::Utc::now().timestamp(),
+                                    "id": request_id
+                                });
+                                ws_server.send_to_client(&client_id, &response).await?;
+                            }
+                            Err(e) => {
+                                let error_response = json!({
+                                    "endpoint": "/flowmeter/stats",
+                                    "status": "error",
+                                    "error": format!("Database error: {}", e),
+                                    "id": request_id
+                                });
+                                ws_server.send_to_client(&client_id, &error_response).await?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    // ADD: Method to start WebSocket request processing loop
+    pub async fn start_websocket_request_handler(&self, mut rx: mpsc::Receiver<WebSocketRequest>) {
+        info!("🔄 Starting WebSocket request handler loop");
+        
+        while let Some(request) = rx.recv().await {
+            if let Err(e) = self.handle_websocket_request(request).await {
+                error!("❌ Failed to handle WebSocket request: {}", e);
+            }
+        }
+        
+        info!("🛑 WebSocket request handler stopped");
     }
 }

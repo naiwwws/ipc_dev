@@ -60,7 +60,7 @@ pub struct WebSocketServer {
     client_stats: Arc<RwLock<HashMap<String, ClientInfo>>>,
     is_running: Arc<RwLock<bool>>,
     port: u16,
-    data_service_tx: Option<Arc<mpsc::Sender<WebSocketRequest>>>, // FIX: Use tokio::sync::mpsc
+    data_service_tx: Option<Arc<mpsc::Sender<WebSocketRequest>>>, // Make it Arc
 }
 
 impl WebSocketServer {
@@ -76,9 +76,10 @@ impl WebSocketServer {
         }
     }
 
-    // ADD: Method to set the communication channel with DataService
+    // Fix the channel setter method
     pub fn set_data_service_channel(&mut self, sender: mpsc::Sender<WebSocketRequest>) {
         self.data_service_tx = Some(Arc::new(sender));
+        info!("✅ DataService communication channel established for WebSocket server");
     }
 
     pub async fn start(&self) -> Result<(), ModbusError> {
@@ -157,42 +158,71 @@ impl WebSocketServer {
                         debug!("📥 Received message from client {}: {}", client_id, text);
                         
                         // Parse the message as JSON
-                        if let Ok(json_msg) = serde_json::from_str::<serde_json::Value>(&text) {
-                            // Check if this is an endpoint request
-                            if let (Some(endpoint), Some(method)) = (
-                                json_msg.get("endpoint").and_then(|v| v.as_str()),
-                                json_msg.get("method").and_then(|v| v.as_str())
-                            ) {
-                                let request_id = json_msg.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                
-                                // Handle different endpoints
-                                match endpoint {
-                                    "/flowmeter/read" => {
-                                        self.handle_flowmeter_read_endpoint(&client_id, method, &json_msg, request_id).await;
-                                    },
-                                    "/flowmeter/stop" => {
-                                        self.handle_flowmeter_stop_endpoint(&client_id, method, request_id).await;
-                                    },
-                                    "/flowmeter/recent" => {
-                                        self.handle_flowmeter_recent_endpoint(&client_id, method, &json_msg, request_id).await;
-                                    },
-                                    "/flowmeter/stats" => {
-                                        self.handle_flowmeter_stats_endpoint(&client_id, method, &json_msg, request_id).await;
-                                    },
-                                    "/system/status" => {
-                                        self.handle_system_status_endpoint(&client_id, method, request_id).await;
-                                    },
-                                    _ => {
-                                        // Unknown endpoint
-                                        let error_response = json!({
-                                            "endpoint": endpoint,
-                                            "status": "error",
-                                            "error": "Unknown endpoint",
-                                            "id": request_id
-                                        });
-                                        self.send_to_client(&client_id, &error_response).await.ok();
+                        match serde_json::from_str::<serde_json::Value>(&text) {
+                            Ok(json_msg) => {
+                                // Check if this is an endpoint request
+                                if let (Some(endpoint), Some(method)) = (
+                                    json_msg.get("endpoint").and_then(|v| v.as_str()),
+                                    json_msg.get("method").and_then(|v| v.as_str())
+                                ) {
+                                    let request_id = json_msg.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                    info!("🎯 Processing endpoint: {} with method: {} for client: {}", endpoint, method, client_id);
+                                    
+                                    // Handle different endpoints
+                                    match endpoint {
+                                        "/flowmeter/read" => {
+                                            self.handle_flowmeter_read_endpoint(&client_id, method, &json_msg, request_id).await;
+                                        },
+                                        "/flowmeter/stop" => {
+                                            info!("🛑 Handling /flowmeter/stop for client {}", client_id);
+                                            self.handle_flowmeter_stop_endpoint(&client_id, method, request_id).await;
+                                        },
+                                        "/flowmeter/recent" => {
+                                            self.handle_flowmeter_recent_endpoint(&client_id, method, &json_msg, request_id).await;
+                                        },
+                                        "/flowmeter/stats" => {
+                                            self.handle_flowmeter_stats_endpoint(&client_id, method, &json_msg, request_id).await;
+                                        },
+                                        "/system/status" => {
+                                            self.handle_system_status_endpoint(&client_id, method, request_id).await;
+                                        },
+                                        _ => {
+                                            // Unknown endpoint
+                                            warn!("❓ Unknown endpoint: {} from client {}", endpoint, client_id);
+                                            let error_response = json!({
+                                                "endpoint": endpoint,
+                                                "status": "error",
+                                                "error": "Unknown endpoint",
+                                                "available_endpoints": [
+                                                    "/flowmeter/read",
+                                                    "/flowmeter/stop", 
+                                                    "/flowmeter/recent",
+                                                    "/flowmeter/stats",
+                                                    "/system/status"
+                                                ],
+                                                "id": request_id
+                                            });
+                                            self.send_to_client(&client_id, &error_response).await.ok();
+                                        }
                                     }
+                                } else {
+                                    warn!("❌ Invalid message format from client {}: missing endpoint or method", client_id);
+                                    let error_response = json!({
+                                        "status": "error",
+                                        "error": "Invalid message format. Expected: {\"endpoint\": \"/path\", \"method\": \"GET/POST\", \"id\": \"request_id\"}",
+                                        "received": json_msg
+                                    });
+                                    self.send_to_client(&client_id, &error_response).await.ok();
                                 }
+                            }
+                            Err(e) => {
+                                warn!("❌ Failed to parse JSON from client {}: {} - Message: {}", client_id, e, text);
+                                let error_response = json!({
+                                    "status": "error",
+                                    "error": format!("Invalid JSON: {}", e),
+                                    "received_text": text
+                                });
+                                self.send_to_client(&client_id, &error_response).await.ok();
                             }
                         }
                     }
@@ -292,11 +322,11 @@ impl WebSocketServer {
 
     // NEW: Add /flowmeter/stop endpoint handler
     async fn handle_flowmeter_stop_endpoint(&self, client_id: &str, method: &str, request_id: &str) {
-        if method != "POST" {
+        if method != "GET" && method != "POST" {
             let error_response = json!({
                 "endpoint": "/flowmeter/stop",
                 "status": "error",
-                "error": "Method not supported. Use POST",
+                "error": "Method not supported. Use GET",
                 "id": request_id
             });
             self.send_to_client(client_id, &error_response).await.ok();
@@ -790,7 +820,7 @@ impl WebSocketServer {
                 "client_id": client_id,
                 "streaming_info": {
                     "start_streaming": "Send GET to /flowmeter/read",
-                    "stop_streaming": "Send POST to /flowmeter/stop"
+                    "stop_streaming": "Send GET to /flowmeter/stop"
                 }
             }
         });
@@ -825,5 +855,59 @@ impl WebSocketServer {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    // ADD: Method to debug client state
+    pub async fn debug_client_state(&self, client_id: &str) -> Option<String> {
+        let stats = self.client_stats.read().await;
+        if let Some(client_info) = stats.get(client_id) {
+            Some(format!(
+                "Client {}: streaming={}, device={:?}, subscribed_to={:?}",
+                client_id,
+                client_info.is_streaming,
+                client_info.streaming_device,
+                client_info.subscribed_endpoints
+            ))
+        } else {
+            None
+        }
+    }
+
+    // ADD: Method to force stop streaming for a client
+    pub async fn force_stop_streaming(&self, client_id: &str) -> Result<(), ModbusError> {
+        info!("🔧 Force stopping streaming for client {}", client_id);
+        
+        // Update client state
+        {
+            let mut client_stats = self.client_stats.write().await;
+            if let Some(stats) = client_stats.get_mut(client_id) {
+                stats.is_streaming = false;
+                stats.streaming_device = None;
+            }
+        }
+        
+        // Notify DataService
+        if let Some(tx) = &self.data_service_tx {
+            let request = WebSocketRequest::StopStreaming {
+                client_id: client_id.to_string(),
+                request_id: "force_stop".to_string(),
+            };
+            
+            if let Err(e) = tx.send(request).await {
+                error!("Failed to notify DataService of force stop: {}", e);
+            }
+        }
+        
+        // Send confirmation to client
+        let response = json!({
+            "endpoint": "/flowmeter/stop",
+            "status": "force_stopped",
+            "message": "Streaming forcefully stopped",
+            "timestamp": chrono::Utc::now().timestamp(),
+            "streaming": false
+        });
+        
+        self.send_to_client(client_id, &response).await?;
+        Ok(())
     }
 }
