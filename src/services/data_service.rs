@@ -34,9 +34,20 @@ pub struct DataService {
 // KEEP: Clone implementation ABOVE the main impl block (this one is correct)
 impl Clone for DataService {
     fn clone(&self) -> Self {
+        // FIX: Clone devices properly instead of creating empty Vec
+        let mut cloned_devices: Vec<Box<dyn Device>> = Vec::new();
+        for device in &self.devices {
+            // Create new FlowmeterDevice instances from the existing ones
+            let flowmeter = FlowmeterDevice::new(
+                device.address(),
+                device.name().to_string(),
+            );
+            cloned_devices.push(Box::new(flowmeter));
+        }
+
         Self {
             config: self.config.clone(),
-            devices: Vec::new(), // Don't clone devices, create empty vec
+            devices: cloned_devices, // FIX: Use properly cloned devices
             device_data: self.device_data.clone(),
             device_address_to_uuid: self.device_address_to_uuid.clone(),
             modbus_client: self.modbus_client.clone(),
