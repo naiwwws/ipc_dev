@@ -35,6 +35,9 @@ pub enum ModbusError {
     
     #[error("Serialization error: {0}")]
     SerializationError(String),
+    
+    #[error("Service not available: {0}")]
+    ServiceNotAvailable(String),
 }
 
 impl From<sqlx::Error> for ModbusError {

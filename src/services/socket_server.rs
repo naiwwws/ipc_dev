@@ -3,14 +3,14 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc}; // ADD: mpsc import
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, stream::{SplitStream, SplitSink}}; // ADD: SplitSink import
 
 use crate::config::Config;
 use crate::devices::traits::DeviceData;
-use crate::devices::flowmeter::FlowmeterData;
+// REMOVE: use crate::devices::flowmeter::FlowmeterData; // This import might be causing issues
 use crate::utils::error::ModbusError;
 use crate::storage::models::{FlowmeterReading, FlowmeterStats};
 
@@ -23,12 +23,33 @@ pub struct ClientInfo {
     pub subscribed_endpoints: Vec<String>,
 }
 
+// Define the WebSocketRequest type for communication with DataService
+#[derive(Debug)]
+pub enum WebSocketRequest {
+    ReadFlowmeter { 
+        client_id: String, 
+        device_address: Option<u8>,
+        request_id: String 
+    },
+    GetRecentReadings { 
+        client_id: String, 
+        limit: i64,
+        request_id: String 
+    },
+    GetStats { 
+        client_id: String,
+        request_id: String  
+    },
+}
+
+#[derive(Clone)]
 pub struct WebSocketServer {
     config: Config,
-    clients: Arc<RwLock<HashMap<String, WebSocketStream<TcpStream>>>>,
+    clients: Arc<RwLock<HashMap<String, SplitSink<WebSocketStream<TcpStream>, Message>>>>,
     client_stats: Arc<RwLock<HashMap<String, ClientInfo>>>,
     is_running: Arc<RwLock<bool>>,
     port: u16,
+    data_service_tx: Option<Arc<mpsc::Sender<WebSocketRequest>>>, // FIX: Use tokio::sync::mpsc
 }
 
 impl WebSocketServer {
@@ -40,7 +61,13 @@ impl WebSocketServer {
             client_stats: Arc::new(RwLock::new(HashMap::new())),
             is_running: Arc::new(RwLock::new(false)),
             port,
+            data_service_tx: None,
         }
+    }
+
+    // ADD: Method to set the communication channel with DataService
+    pub fn set_data_service_channel(&mut self, sender: mpsc::Sender<WebSocketRequest>) {
+        self.data_service_tx = Some(Arc::new(sender));
     }
 
     pub async fn start(&self) -> Result<(), ModbusError> {
@@ -67,14 +94,25 @@ impl WebSocketServer {
                                 connected_at: chrono::Utc::now(),
                                 bytes_sent: 0,
                                 messages_sent: 0,
-                                subscribed_endpoints: vec!["/flowmeter/read".to_string()], // Default subscription
+                                subscribed_endpoints: vec!["/flowmeter/read".to_string()],
                             };
 
-                            self.clients.write().await.insert(client_id.clone(), ws_stream);
+                            // Create split stream for handling incoming messages
+                            let (write, read) = ws_stream.split();
+                            
+                            // Store writer part in clients map
+                            self.clients.write().await.insert(client_id.clone(), write);
                             self.client_stats.write().await.insert(client_id.clone(), client_info);
 
                             // Send welcome message with available endpoints
                             self.send_welcome_message(&client_id).await.ok();
+                            
+                            // Spawn a task to handle incoming messages from this client
+                            let client_id_clone = client_id.clone();
+                            let server = self.clone();
+                            tokio::spawn(async move {
+                                server.handle_client_messages(client_id_clone, read).await;
+                            });
                         }
                         Err(e) => {
                             warn!("❌ Failed to establish WebSocket connection with {}: {}", client_id, e);
@@ -88,6 +126,250 @@ impl WebSocketServer {
         }
 
         Ok(())
+    }
+
+    // New method to handle incoming client messages
+    async fn handle_client_messages(&self, client_id: String, mut read_half: SplitStream<WebSocketStream<TcpStream>>) {
+        while let Some(msg_result) = read_half.next().await {
+            match msg_result {
+                Ok(msg) => {
+                    if let Message::Text(text) = msg {
+                        debug!("📥 Received message from client {}: {}", client_id, text);
+                        
+                        // Parse the message as JSON
+                        if let Ok(json_msg) = serde_json::from_str::<serde_json::Value>(&text) {
+                            // Check if this is an endpoint request
+                            if let (Some(endpoint), Some(method)) = (
+                                json_msg.get("endpoint").and_then(|v| v.as_str()),
+                                json_msg.get("method").and_then(|v| v.as_str())
+                            ) {
+                                let request_id = json_msg.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                
+                                // Handle different endpoints
+                                match endpoint {
+                                    "/flowmeter/read" => {
+                                        self.handle_flowmeter_read_endpoint(&client_id, method, &json_msg, request_id).await;
+                                    },
+                                    "/flowmeter/recent" => {
+                                        self.handle_flowmeter_recent_endpoint(&client_id, method, &json_msg, request_id).await;
+                                    },
+                                    "/flowmeter/stats" => {
+                                        self.handle_flowmeter_stats_endpoint(&client_id, method, &json_msg, request_id).await;
+                                    },
+                                    "/system/status" => {
+                                        self.handle_system_status_endpoint(&client_id, method, request_id).await;
+                                    },
+                                    _ => {
+                                        // Unknown endpoint
+                                        let error_response = json!({
+                                            "endpoint": endpoint,
+                                            "status": "error",
+                                            "error": "Unknown endpoint",
+                                            "id": request_id
+                                        });
+                                        self.send_to_client(&client_id, &error_response).await.ok();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!("❌ Error receiving message from client {}: {}", client_id, e);
+                    break;
+                }
+            }
+        }
+        
+        // Client disconnected
+        info!("🔌 Client {} disconnected", client_id);
+        let mut clients = self.clients.write().await;
+        let mut stats = self.client_stats.write().await;
+        clients.remove(&client_id);
+        stats.remove(&client_id);
+    }
+
+    // Updated handler for /flowmeter/read endpoint to use the channel
+    async fn handle_flowmeter_read_endpoint(&self, client_id: &str, method: &str, params: &Value, request_id: &str) {
+        if method != "GET" {
+            let error_response = json!({
+                "endpoint": "/flowmeter/read",
+                "status": "error",
+                "error": "Method not supported. Use GET",
+                "id": request_id
+            });
+            self.send_to_client(client_id, &error_response).await.ok();
+            return;
+        }
+
+        // Extract device_address parameter if provided
+        let device_address = params.get("params")
+            .and_then(|p| p.get("device_address"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u8);
+
+        // Send a preliminary response to the client
+        let response = json!({
+            "endpoint": "/flowmeter/read",
+            "status": "pending",
+            "message": format!(
+                "Reading flowmeter data{}. Please wait...", 
+                device_address.map_or("".to_string(), |addr| format!(" from device {}", addr))
+            ),
+            "timestamp": chrono::Utc::now().timestamp(),
+            "id": request_id
+        });
+        
+        self.send_to_client(client_id, &response).await.ok();
+        
+        // Send the request to DataService via the channel
+        if let Some(tx) = &self.data_service_tx {
+            let request = WebSocketRequest::ReadFlowmeter {
+                client_id: client_id.to_string(),
+                device_address,
+                request_id: request_id.to_string(),
+            };
+            
+            if let Err(e) = tx.send(request).await {
+                error!("Failed to send flowmeter read request to DataService: {}", e);
+                let error_response = json!({
+                    "endpoint": "/flowmeter/read",
+                    "status": "error",
+                    "error": "Internal communication error",
+                    "id": request_id
+                });
+                self.send_to_client(client_id, &error_response).await.ok();
+            }
+        } else {
+            error!("No DataService channel available");
+            let error_response = json!({
+                "endpoint": "/flowmeter/read",
+                "status": "error",
+                "error": "Service not available",
+                "id": request_id
+            });
+            self.send_to_client(client_id, &error_response).await.ok();
+        }
+    }
+
+    // Similarly update other endpoint handlers...
+    async fn handle_flowmeter_recent_endpoint(&self, client_id: &str, method: &str, params: &Value, request_id: &str) {
+        if method != "GET" {
+            let error_response = json!({
+                "endpoint": "/flowmeter/recent",
+                "status": "error",
+                "error": "Method not supported. Use GET",
+                "id": request_id
+            });
+            self.send_to_client(client_id, &error_response).await.ok();
+            return;
+        }
+
+        // Get limit parameter if provided
+        let limit = params.get("params")
+            .and_then(|p| p.get("limit"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as i64;
+
+        // Send the request to DataService via the channel
+        if let Some(tx) = &self.data_service_tx {
+            let request = WebSocketRequest::GetRecentReadings {
+                client_id: client_id.to_string(),
+                limit,
+                request_id: request_id.to_string(),
+            };
+            
+            if let Err(e) = tx.send(request).await {
+                error!("Failed to send recent readings request to DataService: {}", e);
+                let error_response = json!({
+                    "endpoint": "/flowmeter/recent",
+                    "status": "error",
+                    "error": "Internal communication error",
+                    "id": request_id
+                });
+                self.send_to_client(client_id, &error_response).await.ok();
+            }
+        } else {
+            error!("No DataService channel available");
+            let error_response = json!({
+                "endpoint": "/flowmeter/recent",
+                "status": "error",
+                "error": "Service not available",
+                "id": request_id
+            });
+            self.send_to_client(client_id, &error_response).await.ok();
+        }
+    }
+
+    async fn handle_flowmeter_stats_endpoint(&self, client_id: &str, method: &str, _params: &Value, request_id: &str) {
+        if method != "GET" {
+            let error_response = json!({
+                "endpoint": "/flowmeter/stats",
+                "status": "error",
+                "error": "Method not supported. Use GET",
+                "id": request_id
+            });
+            self.send_to_client(client_id, &error_response).await.ok();
+            return;
+        }
+
+        // Send the request to DataService via the channel
+        if let Some(tx) = &self.data_service_tx {
+            let request = WebSocketRequest::GetStats {
+                client_id: client_id.to_string(),
+                request_id: request_id.to_string(),
+            };
+            
+            if let Err(e) = tx.send(request).await {
+                error!("Failed to send stats request to DataService: {}", e);
+                let error_response = json!({
+                    "endpoint": "/flowmeter/stats",
+                    "status": "error",
+                    "error": "Internal communication error",
+                    "id": request_id
+                });
+                self.send_to_client(client_id, &error_response).await.ok();
+            }
+        } else {
+            error!("No DataService channel available");
+            let error_response = json!({
+                "endpoint": "/flowmeter/stats",
+                "status": "error",
+                "error": "Service not available",
+                "id": request_id
+            });
+            self.send_to_client(client_id, &error_response).await.ok();
+        }
+    }
+
+    async fn handle_system_status_endpoint(&self, client_id: &str, method: &str, request_id: &str) {
+        if method != "GET" {
+            let error_response = json!({
+                "endpoint": "/system/status",
+                "status": "error",
+                "error": "Method not supported. Use GET",
+                "id": request_id
+            });
+            self.send_to_client(client_id, &error_response).await.ok();
+            return;
+        }
+
+        // Basic system status that we can provide directly from the WebSocketServer
+        let response = json!({
+            "endpoint": "/system/status",
+            "status": "success",
+            "data": {
+                "websocket_server": {
+                    "running": true,
+                    "port": self.port,
+                    "connected_clients": self.get_client_count().await,
+                },
+                "timestamp": chrono::Utc::now().timestamp(),
+            },
+            "id": request_id
+        });
+        
+        self.send_to_client(client_id, &response).await.ok();
     }
 
     /// Send flowmeter data to all clients subscribed to /flowmeter/read endpoint
@@ -232,7 +514,12 @@ impl WebSocketServer {
         Ok(())
     }
 
-    async fn send_to_client(&self, client_id: &str, message: &Value) -> Result<(), ModbusError> {
+    // FIX: Make send_to_client public and add an alias
+    pub async fn send_response_to_client(&self, client_id: &str, message: &Value) -> Result<(), ModbusError> {
+        self.send_to_client(client_id, message).await
+    }
+
+    pub async fn send_to_client(&self, client_id: &str, message: &Value) -> Result<(), ModbusError> {
         let message_text = serde_json::to_string(message).map_err(|e| {
             ModbusError::InvalidData(format!("Failed to serialize message: {}", e))
         })?;
@@ -272,7 +559,8 @@ impl WebSocketServer {
         // Close all WebSocket connections
         let mut clients = self.clients.write().await;
         for (client_id, mut ws_stream) in clients.drain() {
-            if let Err(e) = ws_stream.close(None).await {
+            // FIX: Remove the None parameter from close()
+            if let Err(e) = ws_stream.close().await {
                 warn!("Failed to close WebSocket connection for client {}: {}", client_id, e);
             }
         }

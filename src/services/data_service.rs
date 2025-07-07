@@ -2,6 +2,9 @@ use log::{error, info, warn, debug};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, interval, Duration};
+use tokio::sync::mpsc;
+use serde_json::json;
+use crate::services::socket_server::WebSocketRequest;
 
 use crate::config::Config;
 use crate::modbus::ModbusClient;
@@ -21,7 +24,24 @@ pub struct DataService {
     formatter: Box<dyn DataFormatter>,
     senders: Vec<Box<dyn DataSender>>,
     database_service: Option<DatabaseService>,
-    websocket_server: Option<Arc<WebSocketServer>>, // Changed from socket_server
+    websocket_server: Option<Arc<WebSocketServer>>,
+}
+
+// KEEP: Clone implementation ABOVE the main impl block (this one is correct)
+impl Clone for DataService {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            devices: Vec::new(), // Don't clone devices, create empty vec
+            device_data: self.device_data.clone(),
+            device_address_to_uuid: self.device_address_to_uuid.clone(),
+            modbus_client: self.modbus_client.clone(),
+            formatter: Box::new(ConsoleFormatter),
+            senders: Vec::new(),
+            database_service: self.database_service.clone(),
+            websocket_server: self.websocket_server.clone(),
+        }
+    }
 }
 
 impl DataService {
@@ -53,11 +73,10 @@ impl DataService {
             }
         }
 
-        //  Initialize and start database service
+        // Initialize and start database service
         let database_service = if config.output.database_output.as_ref().map(|db| db.enabled).unwrap_or(false) {
             match DatabaseService::new(config.clone()).await {
-                Ok(mut db_service) => {
-                    // FIX: Remove the start() call since it doesn't exist
+                Ok(db_service) => {
                     info!("💾 Database service initialized successfully");
                     Some(db_service)
                 }
@@ -71,17 +90,22 @@ impl DataService {
             None
         };
 
-        // Create formatter - FIX: ConsoleFormatter is a unit struct
+        // Create formatter
         let formatter: Box<dyn DataFormatter> = Box::new(ConsoleFormatter);
 
-        // Initialize senders - FIX: Make mutable to allow push
+        // Initialize senders
         let mut senders: Vec<Box<dyn DataSender>> = Vec::new();
         senders.push(Box::new(ConsoleSender));
 
-        // FIX: Initialize WebSocket server if enabled and mode is websocket
+        // Create a channel for WebSocket server requests
+        let (ws_tx, mut ws_rx) = mpsc::channel::<WebSocketRequest>(100);
+        
+        // Initialize WebSocket server if enabled and mode is websocket
         let websocket_server: Option<Arc<WebSocketServer>> = if config.socket_server.enabled 
             && config.socket_server.mode == "websocket" {
-            let server = WebSocketServer::new(config.clone());
+            let mut server = WebSocketServer::new(config.clone());
+            // Set the sender channel
+            server.set_data_service_channel(ws_tx.clone());
             info!("🔌 WebSocket server initialized on port {}", server.port());
             Some(Arc::new(server))
         } else if config.socket_server.enabled {
@@ -91,7 +115,8 @@ impl DataService {
             None
         };
 
-        Ok(DataService {
+        // Create the DataService instance
+        let data_service = Self {
             config,
             devices,
             device_data: Arc::new(Mutex::new(HashMap::new())),
@@ -101,7 +126,214 @@ impl DataService {
             senders,
             database_service,
             websocket_server,
-        })
+        };
+        
+        // ALTERNATIVE APPROACH: Use Arc instead of cloning the entire service
+        let data_service_arc = Arc::new(data_service);
+        let data_service_clone = Arc::clone(&data_service_arc);
+        
+        // Spawn a task to handle WebSocket requests
+        tokio::spawn(async move {
+            while let Some(request) = ws_rx.recv().await {
+                match request {
+                    WebSocketRequest::ReadFlowmeter { client_id, device_address, request_id } => {
+                        if let Err(e) = data_service_clone.handle_flowmeter_read_request(client_id, device_address, request_id).await {
+                            error!("Error handling flowmeter read request: {}", e);
+                        }
+                    },
+                    WebSocketRequest::GetRecentReadings { client_id, limit, request_id } => {
+                        if let Err(e) = data_service_clone.handle_recent_readings_request(client_id, limit, request_id).await {
+                            error!("Error handling recent readings request: {}", e);
+                        }
+                    },
+                    WebSocketRequest::GetStats { client_id, request_id } => {
+                        if let Err(e) = data_service_clone.handle_stats_request(client_id, request_id).await {
+                            error!("Error handling stats request: {}", e);
+                        }
+                    },
+                }
+            }
+        });
+        
+        // Return the Arc-wrapped service, but we need to extract it
+        // Since we can't return Arc<DataService> from this function, we'll use a different approach
+        Ok(Arc::try_unwrap(data_service_arc).unwrap_or_else(|arc| (*arc).clone()))
+    }
+
+    // Handler methods for WebSocket requests (KEEP ONLY ONE SET)
+    async fn handle_flowmeter_read_request(
+        &self, 
+        client_id: String, 
+        device_address: Option<u8>,
+        request_id: String
+    ) -> Result<(), ModbusError> {
+        // If a specific device is requested, read only that device
+        if let Some(addr) = device_address {
+            if let Some(device) = self.devices.iter().find(|d| d.address() == addr) {
+                info!("📡 Reading device {} for WebSocket client {}", addr, client_id);
+                match device.read_data(self.modbus_client.as_ref()).await {
+                    Ok(data) => {
+                        // Send data to WebSocket client
+                        if let Some(ws_server) = &self.websocket_server {
+                            let response = json!({
+                                "endpoint": "/flowmeter/read",
+                                "status": "success",
+                                "data": data.get_all_parameters(),
+                                "timestamp": chrono::Utc::now().timestamp(),
+                                "id": request_id
+                            });
+                            
+                            ws_server.send_to_client(&client_id, &response).await?;
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ Failed to read device {}: {}", addr, e);
+                        
+                        if let Some(ws_server) = &self.websocket_server {
+                            let error_response = json!({
+                                "endpoint": "/flowmeter/read",
+                                "status": "error",
+                                "error": format!("Failed to read device {}: {}", addr, e),
+                                "id": request_id
+                            });
+                            ws_server.send_to_client(&client_id, &error_response).await?;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Read all devices
+            info!("📡 Reading all devices for WebSocket client {}", client_id);
+            let mut results = Vec::new();
+            let mut success_count = 0;
+            
+            for device in &self.devices {
+                match device.read_data(self.modbus_client.as_ref()).await {
+                    Ok(data) => {
+                        results.push((device.address(), data));
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        error!("❌ Failed to read from device {}: {}", device.address(), e);
+                    }
+                }
+            }
+            
+            // Send combined response to the client
+            if let Some(ws_server) = &self.websocket_server {
+                let devices_data: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|(addr, data)| {
+                        json!({
+                            "device_address": *addr,
+                            "timestamp": data.as_ref().unix_ts(),
+                            "parameters": data.as_ref().get_parameters_as_floats()
+                        })
+                    })
+                    .collect();
+                
+                let response = json!({
+                    "endpoint": "/flowmeter/read",
+                    "status": "success",
+                    "timestamp": chrono::Utc::now().timestamp(),
+                    "total_devices": self.devices.len(),
+                    "successful_reads": success_count,
+                    "devices": devices_data,
+                    "id": request_id
+                });
+                
+                ws_server.send_to_client(&client_id, &response).await?;
+            }
+            
+            info!("✅ Read {} of {} devices successfully for client {}", 
+                  success_count, self.devices.len(), client_id);
+        }
+        
+        Ok(())
+    }
+
+    async fn handle_recent_readings_request(
+        &self, 
+        client_id: String, 
+        limit: i64,
+        request_id: String
+    ) -> Result<(), ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            let readings = db_service.get_recent_flowmeter_readings(limit).await?;
+            
+            if let Some(ws_server) = &self.websocket_server {
+                let response = json!({
+                    "endpoint": "/flowmeter/recent",
+                    "status": "success",
+                    "timestamp": chrono::Utc::now().timestamp(),
+                    "count": readings.len(),
+                    "data": readings,
+                    "id": request_id
+                });
+                
+                ws_server.send_to_client(&client_id, &response).await?;
+                info!("📊 Sent {} recent flowmeter readings to client {}", readings.len(), client_id);
+            }
+        } else {
+            // Database not available
+            if let Some(ws_server) = &self.websocket_server {
+                let error_response = json!({
+                    "endpoint": "/flowmeter/recent",
+                    "status": "error",
+                    "error": "Database service not available",
+                    "id": request_id
+                });
+                ws_server.send_to_client(&client_id, &error_response).await?;
+            }
+            return Err(ModbusError::ServiceNotAvailable("Database service not available".to_string()));
+        }
+        
+        Ok(())
+    }
+
+    async fn handle_stats_request(
+        &self, 
+        client_id: String,
+        request_id: String
+    ) -> Result<(), ModbusError> {
+        if let Some(db_service) = &self.database_service {
+            let stats = db_service.get_flowmeter_stats().await?;
+            
+            if let Some(ws_server) = &self.websocket_server {
+                let response = json!({
+                    "endpoint": "/flowmeter/stats",
+                    "status": "success",
+                    "timestamp": chrono::Utc::now().timestamp(),
+                    "data": {
+                        "total_readings": stats.total_readings,
+                        "avg_mass_flow_rate": stats.avg_mass_flow_rate,
+                        "max_mass_flow_rate": stats.max_mass_flow_rate,
+                        "min_mass_flow_rate": stats.min_mass_flow_rate,
+                        "avg_temperature": stats.avg_temperature,
+                        "latest_timestamp": stats.latest_timestamp,
+                        "earliest_timestamp": stats.earliest_timestamp
+                    },
+                    "id": request_id
+                });
+                
+                ws_server.send_to_client(&client_id, &response).await?;
+                info!("📊 Sent flowmeter statistics to client {}", client_id);
+            }
+        } else {
+            // Database not available
+            if let Some(ws_server) = &self.websocket_server {
+                let error_response = json!({
+                    "endpoint": "/flowmeter/stats",
+                    "status": "error",
+                    "error": "Database service not available",
+                    "id": request_id
+                });
+                ws_server.send_to_client(&client_id, &error_response).await?;
+            }
+            return Err(ModbusError::ServiceNotAvailable("Database service not available".to_string()));
+        }
+        
+        Ok(())
     }
 
     //  Helper method to get device config by address
@@ -118,7 +350,6 @@ impl DataService {
         if let Some(db_service) = &self.database_service {
             if let Some(uuid) = self.get_uuid_from_address(device_address) {
                 if let Some(_device_config) = self.get_device_config_by_address(device_address) {
-                    // FIX: Use only the 3 arguments that the method expects
                     db_service.store_device_data(
                         uuid,           
                         device_address,

@@ -9,6 +9,7 @@ use crate::devices::traits::DeviceData;
 use crate::storage::{SqliteManager, models::{FlowmeterReading, FlowmeterStats}};
 use crate::utils::error::ModbusError;
 
+#[derive(Clone)] // FIX: Add Clone derive
 pub struct DatabaseService {
     config: Config,
     sqlite_manager: SqliteManager,
