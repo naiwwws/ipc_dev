@@ -14,13 +14,10 @@ use log::info;
 use services::DataService;
 use config::{Config, DynamicConfigManager};
 use ipc_dev_rust::{VERSION};
-use cli::commands::handle_subcommands;
+use cli::commands::{handle_subcommands, handle_websocket_commands};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
-
-    let matches = Command::new("Industrial Modbus Service")
+fn build_cli() -> Command {
+    Command::new("ipc_ruist")
         .version(VERSION)
         .about("Modular Industrial Device Communication Service")
         .arg(
@@ -113,6 +110,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .long("socket")
                 .action(clap::ArgAction::SetTrue)
                 .help("Enable socket server on default port (8080)"),
+        )
+        .arg(
+            Arg::new("websocket")
+                .long("websocket")
+                .action(clap::ArgAction::SetTrue)
+                .help("Enable WebSocket server on default port (8080)"),
+        )
+        .arg(
+            Arg::new("websocket-port")
+                .long("websocket-port")
+                .value_name("PORT")
+                .help("Enable WebSocket server on specified port"),
+        )
+        .arg(
+            Arg::new("disable-socket")
+                .long("disable-socket")
+                .action(clap::ArgAction::SetTrue)
+                .help("Disable all socket/websocket servers"),
         )
         .subcommand(
             Command::new("getdata")
@@ -283,7 +298,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .subcommand(Command::new("schema").about("Show database schema"))
         )
+        .subcommand(
+            Command::new("websocket")
+                .about("WebSocket server management")
+                .subcommand(Command::new("status").about("Show WebSocket server status"))
+                .subcommand(Command::new("clients").about("Show connected WebSocket clients"))
+        )
         .get_matches();
+}
+
+fn apply_websocket_config(matches: &ArgMatches, config: &mut Config) {
+    if matches.get_flag("websocket") || matches.contains_id("websocket-port") {
+        config.socket_server.enabled = true;
+        config.socket_server.mode = "websocket".to_string();
+        
+        if let Some(port_str) = matches.get_one::<String>("websocket-port") {
+            config.socket_server.port = port_str.parse::<u16>().unwrap_or(8080);
+        }
+        
+        info!("🔌 WebSocket server enabled on port {}", config.socket_server.port);
+    }
+    
+    if matches.get_flag("disable-socket") {
+        config.socket_server.enabled = false;
+        info!("📝 Socket/WebSocket server disabled");
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+
+    let matches = build_cli();
 
     // Handle config commands FIRST, before creating the service
     if let Some(config_matches) = matches.subcommand_matches("config") {
@@ -349,7 +395,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("🔌 Socket server will start on port {}", config.socket_server.port);
     }
 
+    // ADD: Apply WebSocket configuration
+    apply_websocket_config(&matches, &mut config);
+    
     let mut service = DataService::new(config.clone()).await?;
+
+    // ADD: Handle WebSocket commands before other subcommands
+    if handle_websocket_commands(&matches, &service).await? {
+        return Ok(());
+    }
 
     // Handle other subcommands
     if handle_subcommands(&matches, &mut service).await? {

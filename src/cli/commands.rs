@@ -100,6 +100,11 @@ pub async fn handle_subcommands(
         
         return Ok(true);
     }
+    
+    // ADD: Handle websocket commands here too (as fallback)
+    if handle_websocket_commands(matches, service).await? {
+        return Ok(true);
+    }
 
     // Handle database commands (modify existing db handling)
     if let Some(matches) = matches.subcommand_matches("db") {
@@ -183,5 +188,49 @@ pub async fn handle_subcommands(
         }
     }
 
+    Ok(false)
+}
+
+// Add to handle_commands function
+pub async fn handle_websocket_commands(
+    matches: &clap::ArgMatches,
+    service: &DataService,
+) -> Result<bool> {
+    if let Some(matches) = matches.subcommand_matches("websocket") {
+        if let Some(_) = matches.subcommand_matches("status") {
+            if let Some(port) = service.get_websocket_port() {
+                let client_count = service.get_websocket_client_count().await.unwrap_or(0);
+                println!("🔌 WebSocket Server Status:");
+                println!("  Port: {}", port);
+                println!("  Status: RUNNING");
+                println!("  Connected Clients: {}", client_count);
+                if let Some(stats) = service.get_websocket_client_stats().await {
+                    println!("  Client Details:");
+                    for (client_id, info) in stats {
+                        println!("    - {}: {} messages sent, {} bytes sent", 
+                                client_id, info.messages_sent, info.bytes_sent);
+                    }
+                }
+            } else {
+                println!("📝 WebSocket server is not enabled");
+            }
+            return Ok(true);
+        }
+        if let Some(_) = matches.subcommand_matches("clients") {
+            if let Some(stats) = service.get_websocket_client_stats().await {
+                println!("🔌 Connected WebSocket Clients ({}):", stats.len());
+                for (client_id, info) in stats {
+                    println!("  Client: {}", client_id);
+                    println!("    Connected: {}", info.connected_at.format("%Y-%m-%d %H:%M:%S UTC"));
+                    println!("    Messages: {}", info.messages_sent);
+                    println!("    Bytes: {}", info.bytes_sent);
+                    println!();
+                }
+            } else {
+                println!("📝 No WebSocket clients connected or server not enabled");
+            }
+            return Ok(true);
+        }
+    }
     Ok(false)
 }

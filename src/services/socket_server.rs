@@ -134,6 +134,30 @@ impl WebSocketServer {
         Ok(())
     }
 
+    pub async fn stop(&self) -> Result<(), ModbusError> {
+        info!("🛑 Stopping WebSocket server...");
+        *self.is_running.write().await = false;
+        
+        // Close all WebSocket connections
+        let mut clients = self.clients.write().await;
+        for (client_id, mut ws_stream) in clients.drain() {
+            if let Err(e) = ws_stream.close(None).await {
+                warn!("Failed to close WebSocket connection for client {}: {}", client_id, e);
+            }
+        }
+
+        info!("✅ WebSocket server stopped");
+        Ok(())
+    }
+
+    pub async fn get_client_count(&self) -> usize {
+        self.clients.read().await.len()
+    }
+
+    pub async fn get_client_stats(&self) -> HashMap<String, ClientInfo> {
+        self.client_stats.read().await.clone()
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }

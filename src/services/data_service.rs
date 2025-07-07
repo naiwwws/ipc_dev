@@ -9,7 +9,7 @@ use crate::devices::{Device, DeviceData, FlowmeterDevice};
 use crate::output::{DataFormatter, DataSender, ConsoleFormatter, ConsoleSender};
 use crate::output::raw_sender::{RawDataSender, RawDataFormat};
 use crate::services::DatabaseService;
-use crate::services::socket_server::WebSocketServer; // Update import
+use crate::services::socket_server::WebSocketServer;
 use crate::utils::error::ModbusError;
 
 pub struct DataService {
@@ -21,8 +21,6 @@ pub struct DataService {
     formatter: Box<dyn DataFormatter>,
     senders: Vec<Box<dyn DataSender>>,
     database_service: Option<DatabaseService>,
-
-    // ✅ ADD: Socket server
     websocket_server: Option<Arc<WebSocketServer>>, // Changed from socket_server
 }
 
@@ -80,9 +78,15 @@ impl DataService {
         let mut senders: Vec<Box<dyn DataSender>> = Vec::new();
         senders.push(Box::new(ConsoleSender));
 
-        let websocket_server: Option<Arc<WebSocketServer>> = if config.socket_server.enabled {
+        // FIX: Initialize WebSocket server if enabled and mode is websocket
+        let websocket_server: Option<Arc<WebSocketServer>> = if config.socket_server.enabled 
+            && config.socket_server.mode == "websocket" {
             let server = WebSocketServer::new(config.clone());
+            info!("🔌 WebSocket server initialized on port {}", server.port());
             Some(Arc::new(server))
+        } else if config.socket_server.enabled {
+            info!("📡 Socket server mode: {}", config.socket_server.mode);
+            None
         } else {
             None
         };
@@ -140,62 +144,70 @@ impl DataService {
     //  Fixed run method - use send_device_data instead of broadcast_device_data
     pub async fn run(&self, debug_output: bool) -> Result<(), ModbusError> {
         info!("🚀 Starting continuous monitoring");
+        
         if self.database_service.is_some() {
             info!("💾 Database storage: ENABLED");
         } else {
             info!("📝 Database storage: DISABLED");
         }
-        
-        if self.websocket_server.is_some() {
-            info!("🔌 Socket streaming: ENABLED");
+
+        // Start WebSocket server if enabled
+        if let Some(ws_server) = &self.websocket_server {
+            let server_clone = Arc::clone(ws_server);
+            tokio::spawn(async move {
+                if let Err(e) = server_clone.start().await {
+                    error!("❌ WebSocket server failed: {}", e);
+                }
+            });
+            
+            info!("🔌 WebSocket server: ENABLED on port {}", ws_server.port());
+            // Give the server time to start
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         } else {
-            info!("📝 Socket streaming: DISABLED");
+            info!("📝 WebSocket server: DISABLED");
         }
 
-        let mut interval = interval(Duration::from_secs(self.config.update_interval_seconds));
+        let interval_duration = tokio::time::Duration::from_secs(self.config.update_interval_seconds);
+        let mut interval = tokio::time::interval(interval_duration);
 
         loop {
             interval.tick().await;
-            info!("🔄 Requesting data from devices");
             
-            let mut success_count = 0;
             for device in &self.devices {
+                let addr = device.address();
+                
                 match device.read_data(self.modbus_client.as_ref()).await {
                     Ok(data) => {
-                        let addr = device.address();
+                        if debug_output {
+                            println!("{}", self.formatter.format_single_device(addr, data.as_ref()));
+                        }
                         
-                        // Store to in-memory cache
-                        if let Some(uuid) = self.get_uuid_from_address(addr) {
+                        // Store in memory
+                        if let Some(uuid) = self.device_address_to_uuid.get(&addr) {
                             if let Ok(mut device_data) = self.device_data.lock() {
                                 device_data.insert(uuid.clone(), data.as_ref().clone_box());
                             }
                         }
                         
-                        //  Store to database if enabled
+                        // Store to database if enabled
                         if let Err(e) = self.store_device_data_to_database(addr, data.as_ref()).await {
                             error!("❌ Failed to store device {} data to database: {}", addr, e);
                         }
                         
-                        // FIX: Use send_device_data instead of broadcast_device_data
+                        // Send to WebSocket clients if enabled
                         if let Some(ws_server) = &self.websocket_server {
-                            ws_server.send_device_data(data.as_ref()).await.ok();
+                            if let Err(e) = ws_server.send_device_data(data.as_ref()).await {
+                                error!("❌ Failed to send data to WebSocket clients: {}", e);
+                            } else {
+                                println!("📡 Sent data from device {} to WebSocket clients", addr);
+                            }
                         }
                         
-                        info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
-                        success_count += 1;
+                        info!("✅ Successfully read and processed data from device {} ({})", addr, device.name());
                     }
                     Err(e) => {
-                        error!("❌ Failed to read data from device {} ({}): {:?}", 
-                               device.address(), device.name(), e);
+                        error!("❌ Failed to read from device {} ({}): {}", addr, device.name(), e);
                     }
-                }
-                
-                sleep(Duration::from_millis(100)).await;
-            }
-
-            if debug_output && success_count > 0 {
-                if let Err(e) = self.print_all_device_data().await {
-                    error!("❌ Failed to print device data: {:?}", e);
                 }
             }
         }
@@ -510,10 +522,20 @@ impl DataService {
             info!("📝 Database storage: DISABLED");
         }
         
-        if self.websocket_server.is_some() {
-            info!("🔌 Socket streaming: ENABLED");
+        // FIX: Start WebSocket server if enabled (same as in run() method)
+        if let Some(ws_server) = &self.websocket_server {
+            let server_clone = Arc::clone(ws_server);
+            tokio::spawn(async move {
+                if let Err(e) = server_clone.start().await {
+                    error!("❌ WebSocket server failed: {}", e);
+                }
+            });
+            
+            info!("🔌 WebSocket server: ENABLED on port {}", ws_server.port());
+            // Give the server time to start
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         } else {
-            info!("📝 Socket streaming: DISABLED");
+            info!("📝 WebSocket server: DISABLED");
         }
 
         let mut interval = interval(Duration::from_secs(self.config.update_interval_seconds));
@@ -565,9 +587,27 @@ impl DataService {
         }
     }
 
-
-    pub fn get_socket_port(&self) -> Option<u16> {
+    /// Returns the WebSocket port if the WebSocket server is enabled.
+    pub fn get_websocket_port(&self) -> Option<u16> {
         self.websocket_server.as_ref().map(|s| s.port())
+    }
+
+    /// Returns the number of connected WebSocket clients.
+    pub async fn get_websocket_client_count(&self) -> Option<usize> {
+        if let Some(ws_server) = &self.websocket_server {
+            Some(ws_server.get_client_count().await)
+        } else {
+            None
+        }
+    }
+
+    /// Returns stats for all connected WebSocket clients.
+    pub async fn get_websocket_client_stats(&self) -> Option<HashMap<String, crate::services::socket_server::ClientInfo>> {
+        if let Some(ws_server) = &self.websocket_server {
+            Some(ws_server.get_client_stats().await)
+        } else {
+            None
+        }
     }
 
     // Helper method to get device address from UUID (if still needed)

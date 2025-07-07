@@ -171,14 +171,16 @@ pub struct SocketServerConfig {
     pub enabled: bool,
     pub port: u16,
     pub max_clients: Option<usize>,
+    pub mode: String, // Add mode: "socket" or "websocket"
 }
 
 impl Default for SocketServerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            port: 8080,
+            port: 1234,
             max_clients: Some(10),
+            mode: "websocket".to_string(), // Default to WebSocket
         }
     }
 }
