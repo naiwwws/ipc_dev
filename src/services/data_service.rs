@@ -14,6 +14,7 @@ use crate::output::raw_sender::{RawDataSender, RawDataFormat};
 use crate::services::DatabaseService;
 use crate::services::socket_server::WebSocketServer;
 use crate::utils::error::ModbusError;
+use tokio::sync::Mutex as TokioMutex;
 
 pub struct DataService {
     config: Config,
@@ -25,6 +26,9 @@ pub struct DataService {
     senders: Vec<Box<dyn DataSender>>,
     database_service: Option<DatabaseService>,
     websocket_server: Option<Arc<WebSocketServer>>,
+    // ADD: Fields to track streaming state
+    streaming_clients: Arc<TokioMutex<usize>>,
+    polling_handle: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 // KEEP: Clone implementation ABOVE the main impl block (this one is correct)
@@ -40,6 +44,9 @@ impl Clone for DataService {
             senders: Vec::new(),
             database_service: self.database_service.clone(),
             websocket_server: self.websocket_server.clone(),
+            // ADD: Clone new fields
+            streaming_clients: self.streaming_clients.clone(),
+            polling_handle: self.polling_handle.clone(),
         }
     }
 }
@@ -115,7 +122,7 @@ impl DataService {
             None
         };
 
-        // Create the DataService instance FIRST
+        // Create the DataService instance with new fields
         let data_service = Self {
             config,
             devices,
@@ -126,6 +133,9 @@ impl DataService {
             senders,
             database_service,
             websocket_server,
+            // ADD: Initialize streaming state
+            streaming_clients: Arc::new(TokioMutex::new(0)),
+            polling_handle: Arc::new(TokioMutex::new(None)),
         };
         
         // FIX: Clone data_service for the spawned task instead of moving it into Arc
@@ -353,6 +363,30 @@ impl DataService {
     ) -> Result<(), ModbusError> {
         info!("🎬 Starting streaming for client {} (device: {:?})", client_id, device_address);
         
+        // Increment streaming clients counter and start polling if needed
+        {
+            let mut count = self.streaming_clients.lock().await;
+            *count += 1;
+            
+            // Start polling if this is the first streaming client
+            if *count == 1 {
+                // Create a clone of self for the polling task
+                let self_arc = Arc::new(self.clone());
+                
+                // Start polling in a separate task
+                let handle = tokio::spawn(async move {
+                    Self::start_polling_loop(self_arc).await;
+                });
+                
+                // Store the task handle
+                *self.polling_handle.lock().await = Some(handle);
+                info!("▶️ Started polling loop for first streaming client");
+            } else {
+                info!("📡 Added streaming client (total: {})", *count);
+            }
+        }
+        
+        // Send confirmation to client
         if let Some(ws_server) = &self.websocket_server {
             let response = json!({
                 "endpoint": "/flowmeter/read",
@@ -377,6 +411,26 @@ impl DataService {
     ) -> Result<(), ModbusError> {
         info!("🛑 Stopping streaming for client {}", client_id);
         
+        // Decrement streaming clients counter and stop polling if no clients left
+        {
+            let mut count = self.streaming_clients.lock().await;
+            
+            if *count > 0 {
+                *count -= 1;
+                
+                if *count == 0 {
+                    // Last client stopped streaming, abort the polling task
+                    if let Some(handle) = self.polling_handle.lock().await.take() {
+                        handle.abort();
+                        info!("⏹️ Stopped polling loop (no streaming clients)");
+                    }
+                } else {
+                    info!("📡 Removed streaming client (remaining: {})", *count);
+                }
+            }
+        }
+        
+        // Send confirmation to client
         if let Some(ws_server) = &self.websocket_server {
             let response = json!({
                 "endpoint": "/flowmeter/stop",
@@ -431,9 +485,11 @@ impl DataService {
 
     //  Main continuous monitoring method
     pub async fn run(&self, debug_output: bool) -> Result<(), ModbusError> {
-        info!("🚀 Starting continuous monitoring");
+        info!("🚀 Starting service in endpoint-driven mode");
+        info!("⚙️  Debug output: {}", if debug_output { "enabled" } else { "disabled" });
         
-        if self.database_service.is_some() {
+        // Database status
+        if let Some(_) = &self.database_service {
             info!("💾 Database storage: ENABLED");
         } else {
             info!("📝 Database storage: DISABLED");
@@ -449,68 +505,42 @@ impl DataService {
             });
             
             info!("🔌 WebSocket server: ENABLED on port {}", ws_server.port());
+            info!("📡 Flowmeter reading will start when clients connect to /flowmeter/read");
+            
             // Give the server time to start
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         } else {
             info!("📝 WebSocket server: DISABLED");
+            return Err(ModbusError::ConnectionError("WebSocket server required for endpoint-driven mode".to_string()));
         }
 
-        let interval_duration = tokio::time::Duration::from_secs(self.config.update_interval_seconds);
-        let mut interval = tokio::time::interval(interval_duration);
-        let start_time = std::time::Instant::now();
-
+        // Initial reading to verify devices are working (one-time only)
+        info!("🔍 Performing initial device check...");
+        self.read_all_devices_once().await?;
+        
+        info!("✅ Service started successfully");
+        info!("⏱️  Update interval: {} seconds", self.config.update_interval_seconds);
+        info!("⏳ Service ready. Waiting for WebSocket clients to start streaming...");
+        
+        // Keep the service running but don't poll automatically
         loop {
-            interval.tick().await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
             
-            for device in &self.devices {
-                let addr = device.address();
-                
-                match device.read_data(self.modbus_client.as_ref()).await {
-                    Ok(data) => {
-                        if debug_output {
-                            println!("{}", self.formatter.format_single_device(addr, data.as_ref()));
-                        }
-                        
-                        // Store in memory
-                        if let Some(uuid) = self.device_address_to_uuid.get(&addr) {
-                            if let Ok(mut device_data) = self.device_data.lock() {
-                                device_data.insert(uuid.clone(), data.as_ref().clone_box());
-                            }
-                        }
-                        
-                        // Store to database if enabled
-                        if let Err(e) = self.store_device_data_to_database(addr, data.as_ref()).await {
-                            error!("❌ Failed to store device {} data to database: {}", addr, e);
-                        }
-                        
-                        // Send to WebSocket clients via /flowmeter/read endpoint
-                        if let Some(ws_server) = &self.websocket_server {
-                            if let Err(e) = ws_server.send_device_data(data.as_ref()).await {
-                                error!("❌ Failed to send data to WebSocket clients: {}", e);
-                            } else {
-                                debug!("📡 Sent flowmeter data from device {} to /flowmeter/read endpoint", addr);
-                            }
-                        }
-                        
-                        info!("✅ Successfully read and processed data from device {} ({})", addr, device.name());
-                    }
-                    Err(e) => {
-                        error!("❌ Failed to read from device {} ({}): {}", addr, device.name(), e);
-                    }
-                }
-            }
-
-            // Periodically send system status (every 10 cycles)
-            if let Some(ws_server) = &self.websocket_server {
-                let cycle_count = start_time.elapsed().as_secs() / self.config.update_interval_seconds;
-                if cycle_count % 10 == 0 {
-                    let uptime = start_time.elapsed().as_secs();
-                    if let Err(e) = ws_server.send_system_status(self.devices.len(), uptime).await {
-                        error!("❌ Failed to send system status: {}", e);
-                    }
-                }
+            // Log status periodically
+            let client_count = *self.streaming_clients.lock().await;
+            
+            if client_count > 0 {
+                info!("📊 Status: Active streaming to {} clients", client_count);
+            } else {
+                debug!("💤 Status: No active streaming (endpoint-driven mode)");
             }
         }
+    }
+
+    // Socket-based communication method
+    pub async fn run_socket(&self, debug_output: bool) -> Result<(), ModbusError> {
+        // Use the same implementation as run()
+        self.run(debug_output).await
     }
 
     // Add method to trigger flowmeter readings via WebSocket
@@ -847,80 +877,6 @@ impl DataService {
         Ok(())
     }
 
-    // Socket-based communication method
-    pub async fn run_socket(&self, debug_output: bool) -> Result<(), ModbusError> {
-        info!("🚀 Starting continuous monitoring");
-        if self.database_service.is_some() {
-            info!("💾 Database storage: ENABLED");
-        } else {
-            info!("📝 Database storage: DISABLED");
-        }
-        
-        // FIX: Start WebSocket server if enabled (same as in run() method)
-        if let Some(ws_server) = &self.websocket_server {
-            let server_clone = Arc::clone(ws_server);
-            tokio::spawn(async move {
-                if let Err(e) = server_clone.start().await {
-                    error!("❌ WebSocket server failed: {}", e);
-                }
-            });
-            
-            info!("🔌 WebSocket server: ENABLED on port {}", ws_server.port());
-            // Give the server time to start
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        } else {
-            info!("📝 WebSocket server: DISABLED");
-        }
-
-        let mut interval = interval(Duration::from_secs(self.config.update_interval_seconds));
-
-        loop {
-            interval.tick().await;
-            info!("🔄 Requesting data from devices");
-            
-            let mut success_count = 0;
-            for device in &self.devices {
-                match device.read_data(self.modbus_client.as_ref()).await {
-                    Ok(data) => {
-                        let addr = device.address();
-                        
-                        // Store to in-memory cache
-                        if let Some(uuid) = self.get_uuid_from_address(addr) {
-                            if let Ok(mut device_data) = self.device_data.lock() {
-                                device_data.insert(uuid.clone(), data.as_ref().clone_box());
-                            }
-                        }
-                        
-                        //  Store to database if enabled
-                        if let Err(e) = self.store_device_data_to_database(addr, data.as_ref()).await {
-                            error!("❌ Failed to store device {} data to database: {}", addr, e);
-                        }
-                        
-                        // FIX: Use send_device_data instead of broadcast_device_data
-                        if let Some(ws_server) = &self.websocket_server {
-                            ws_server.send_device_data(data.as_ref()).await.ok();
-                        }
-                        
-                        info!("✅ Successfully read and stored data from device {} ({})", addr, device.name());
-                        success_count += 1;
-                    }
-                    Err(e) => {
-                        error!("❌ Failed to read data from device {} ({}): {:?}", 
-                               device.address(), device.name(), e);
-                    }
-                }
-                
-                sleep(Duration::from_millis(100)).await;
-            }
-
-            if debug_output && success_count > 0 {
-                if let Err(e) = self.print_all_device_data().await {
-                    error!("❌ Failed to print device data: {:?}", e);
-                }
-            }
-        }
-    }
-
     /// Returns the WebSocket port if the WebSocket server is enabled.
     pub fn get_websocket_port(&self) -> Option<u16> {
         self.websocket_server.as_ref().map(|s| s.port())
@@ -952,5 +908,79 @@ impl DataService {
             }
         }
         None
+    }
+
+    // ADD THIS METHOD: Implementation of the missing start_polling_loop
+    async fn start_polling_loop(service: Arc<DataService>) {
+        info!("🔄 Starting device polling loop");
+        
+        // Get polling interval from config
+        let interval_duration = tokio::time::Duration::from_secs(service.config.update_interval_seconds);
+        let mut interval = tokio::time::interval(interval_duration);
+        let start_time = std::time::Instant::now();
+
+        loop {
+            interval.tick().await;
+            
+            // Check if we should still be polling
+            {
+                let count = *service.streaming_clients.lock().await;
+                if count == 0 {
+                    info!("⏹️ No streaming clients, stopping polling loop");
+                    break;
+                }
+            }
+            
+            for device in &service.devices {
+                let addr = device.address();
+                
+                match device.read_data(service.modbus_client.as_ref()).await {
+                    Ok(data) => {
+                        // Store in memory
+                        if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
+                            if let Ok(mut device_data) = service.device_data.lock() {
+                                device_data.insert(uuid.clone(), data.as_ref().clone_box());
+                            }
+                        }
+                        
+                        // Store to database if enabled
+                        if let Some(db_service) = &service.database_service {
+                            if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
+                                if let Err(e) = db_service.store_device_data(
+                                    uuid,
+                                    addr,
+                                    data.as_ref(),
+                                ).await {
+                                    error!("❌ Failed to store device {} data to database: {}", addr, e);
+                                }
+                            }
+                        }
+                        
+                        // Send to WebSocket clients
+                        if let Some(ws_server) = &service.websocket_server {
+                            if let Err(e) = ws_server.send_device_data(data.as_ref()).await {
+                                debug!("📡 WebSocket error: {}", e);
+                            }
+                        }
+                        
+                        debug!("✅ Read data from device {} ({})", addr, device.name());
+                    }
+                    Err(e) => {
+                        error!("❌ Failed to read from device {} ({}): {}", addr, device.name(), e);
+                    }
+                }
+            }
+
+            // Send system status occasionally (every ~10 cycles)
+            let cycle_count = start_time.elapsed().as_secs() / service.config.update_interval_seconds;
+            if cycle_count % 10 == 0 && cycle_count > 0 {
+                if let Some(ws_server) = &service.websocket_server {
+                    let uptime = start_time.elapsed().as_secs();
+                    if let Err(e) = ws_server.send_system_status(service.devices.len(), uptime).await {
+                        debug!("📡 Failed to send system status: {}", e);
+                    }
+                }
+            }
+        }
     }
 }

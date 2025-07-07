@@ -361,10 +361,22 @@ impl WebSocketServer {
     async fn stop_streaming_for_client(&self, client_id: &str) {
         let mut client_stats = self.client_stats.write().await;
         if let Some(stats) = client_stats.get_mut(client_id) {
-            if stats.is_streaming {
-                stats.is_streaming = false;
-                stats.streaming_device = None;
-                info!("🛑 Automatically stopped streaming for disconnected client {}", client_id);
+            // Mark client as not streaming in our stats
+            stats.is_streaming = false;
+            stats.streaming_device = None;
+            
+            // Notify DataService that client stopped streaming
+            if let Some(tx) = &self.data_service_tx {
+                let request = WebSocketRequest::StopStreaming {
+                    client_id: client_id.to_string(),
+                    request_id: "disconnect".to_string(),
+                };
+                
+                if let Err(e) = tx.send(request).await {
+                    error!("Failed to notify DataService of client disconnect: {}", e);
+                } else {
+                    info!("🛑 Notified DataService that client {} disconnected (stopped streaming)", client_id);
+                }
             }
         }
     }
