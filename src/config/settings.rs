@@ -169,26 +169,33 @@ impl Default for DatabaseOutputConfig {
     }
 }
 
+// Update the SocketServerConfig struct - fix the max_clients field type
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SocketServerConfig {
     pub enabled: bool,
     pub port: u16,
-    pub max_clients: Option<usize>,
-    pub mode: String, // Add mode: "socket" or "websocket"
+    pub host: String,
+    pub max_clients: usize,        // ✅ FIX: Change from Option<usize> to usize
+    pub heartbeat_interval: u64,
+    pub client_timeout: u64,
+    pub mode: String,              // ✅ ADD: Missing mode field
 }
 
 impl Default for SocketServerConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            port: 1234,
-            max_clients: Some(10),
-            mode: "websocket".to_string(), // Default to WebSocket
+            enabled: false,
+            port: 8080,
+            host: "0.0.0.0".to_string(),
+            max_clients: 100,         // ✅ FIX: Direct value, not Some(100)
+            heartbeat_interval: 30,
+            client_timeout: 60,
+            mode: "websocket".to_string(),
         }
     }
 }
 
-// NEW: API server configuration
+// ✅ ADD: Complete ApiServerConfig if missing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiServerConfig {
     pub enabled: bool,
@@ -201,7 +208,7 @@ pub struct ApiServerConfig {
 impl Default for ApiServerConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             port: 3000,
             host: "0.0.0.0".to_string(),
             cors_enabled: true,
@@ -350,8 +357,13 @@ impl Default for Config {
                 timezone: "UTC+07:00".to_string(),
                 operator: "Plant Operations Team".to_string(),
                 department: "Production".to_string(),
-                contact_email: "operations@company.com".to_string(),
-                metadata: HashMap::new(),
+                contact_email: "operations@plant.com".to_string(),
+                metadata: {
+                    let mut map = HashMap::new();
+                    map.insert("region".to_string(), "Asia Pacific".to_string());
+                    map.insert("facility_code".to_string(), "FAC_001".to_string());
+                    map
+                },
             },
             
             // Legacy compatibility
@@ -359,7 +371,7 @@ impl Default for Config {
 
             // Socket server configuration
             socket_server: SocketServerConfig::default(),
-
+            
             // API server configuration
             api_server: ApiServerConfig::default(),
         }
@@ -410,38 +422,76 @@ impl Config {
     }
 
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)?;
-        let mut config: Config = toml::from_str(&content)?;
+        let path_ref = path.as_ref();
         
-        // Generate IPC UUID if not present (for backward compatibility)
+        // ✅ ADD: Better error messages
+        if !path_ref.exists() {
+            return Err(format!("Config file does not exist: {}", path_ref.display()).into());
+        }
+        
+        info!("📖 Reading config file: {}", path_ref.display());
+        
+        let content = std::fs::read_to_string(path_ref)
+            .map_err(|e| format!("Failed to read config file {}: {}", path_ref.display(), e))?;
+        
+        debug!("📝 Config file content length: {} bytes", content.len());
+        
+        let mut config: Config = toml::from_str(&content)
+            .map_err(|e| {
+                error!("❌ TOML parsing error in {}: {}", path_ref.display(), e);
+                format!("Invalid TOML syntax in {}: {}", path_ref.display(), e)
+            })?;
+        
+        // ✅ ENHANCE: Backward compatibility and validation
         if config.ipc_uuid.is_empty() {
             config.ipc_uuid = Uuid::new_v4().to_string();
+            warn!("🔧 Generated new IPC UUID: {}", config.ipc_uuid);
         }
         
-        // Set default IPC name if not present
         if config.ipc_name.is_empty() {
             config.ipc_name = "Industrial Data Collector".to_string();
+            warn!("🔧 Set default IPC name: {}", config.ipc_name);
         }
         
-        // Set version if not present
         if config.ipc_version.is_empty() {
             config.ipc_version = crate::VERSION.to_string();
+            warn!("🔧 Set IPC version: {}", config.ipc_version);
         }
         
-        // Ensure device_addresses is synced with devices
+        // ✅ ENSURE: device_addresses sync
         config.device_addresses = config.devices.iter().map(|d| d.address).collect();
+        
+        // ✅ VALIDATE: Socket server config
+        if config.socket_server.max_clients == 0 {
+            config.socket_server.max_clients = 100;
+            warn!("🔧 Set default max_clients: 100");
+        }
+        
+        info!("✅ Successfully loaded config from: {}", path_ref.display());
+        info!("   - Devices: {}", config.devices.len());
+        info!("   - Socket Server: {}", if config.socket_server.enabled { "enabled" } else { "disabled" });
+        info!("   - API Server: {}", if config.api_server.enabled { "enabled" } else { "disabled" });
         
         Ok(config)
     }
 
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
-        // Create directory if it doesn't exist
-        if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent)?;
+        let path_ref = path.as_ref();
+        
+        // ✅ ENSURE: Create directory
+        if let Some(parent) = path_ref.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
         }
         
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
+        // ✅ ENHANCE: Pretty TOML output
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize config to TOML: {}", e))?;
+        
+        std::fs::write(path_ref, content)
+            .map_err(|e| format!("Failed to write config file {}: {}", path_ref.display(), e))?;
+        
+        info!("💾 Config saved to: {}", path_ref.display());
         Ok(())
     }
 

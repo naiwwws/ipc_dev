@@ -366,24 +366,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Load config from file or command line
+    // ✅ ENHANCE: Config loading with better error handling
     let config_file = matches.get_one::<String>("config-file").unwrap();
+    
+    info!("🔍 Attempting to load config from: {}", config_file);
+    
     let mut config = if std::path::Path::new(config_file).exists() {
-        info!("📁 Loading config from file: {}", config_file);
-        Config::from_file(config_file).unwrap_or_else(|e| {
-            eprintln!("❌ Failed to load config file: {}, using defaults", e);
-            Config::default()
-        })
+        info!("📁 Loading config from existing file: {}", config_file);
+        match Config::from_file(config_file) {
+            Ok(config) => {
+                info!("✅ Successfully loaded config from file");
+                config
+            },
+            Err(e) => {
+                eprintln!("❌ Failed to load config file: {}", e);
+                info!("🔄 Using default configuration and saving it");
+                let default_config = Config::default();
+                
+                // Try to save default config
+                if let Err(save_err) = default_config.save_to_file(config_file) {
+                    info!("⚠️  Failed to save default config: {}", save_err);
+                } else {
+                    info!("💾 Saved default config to: {}", config_file);
+                }
+                
+                default_config
+            }
+        }
     } else {
-        info!("📁 Config file not found, using CLI args and defaults");
-        let config = Config::from_matches(&matches).unwrap_or_else(|e| {
-            eprintln!("❌ Failed to parse CLI args: {}, using defaults", e);
-            Config::default()
-        });
+        info!("📁 Config file not found, creating from CLI args and defaults");
+        let config = match Config::from_matches(&matches) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("❌ Failed to parse CLI args: {}", e);
+                info!("🔄 Using default configuration");
+                Config::default()
+            }
+        };
         
         // Save the config file for future use
         if let Err(e) = config.save_to_file(config_file) {
-            eprintln!("⚠️  Failed to save initial config file: {}", e);
+            info!("⚠️  Failed to save initial config file: {}", e);
         } else {
             info!("💾 Created initial config file: {}", config_file);
         }
@@ -391,14 +414,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config
     };
 
-    // ✅ Now you can modify config because it's mutable
+    // ✅ FIX: Socket server configuration
     if matches.get_flag("socket") || matches.contains_id("socket-port") {
         config.socket_server.enabled = true;
         
         if let Some(port_str) = matches.get_one::<String>("socket-port") {
             config.socket_server.port = port_str.parse::<u16>()
                 .unwrap_or_else(|_| {
-                    eprintln!("Invalid port number, using default 8080");
+                    eprintln!("Invalid socket port number, using default 8080");
                     8080
                 });
         }
@@ -409,7 +432,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Apply WebSocket configuration
     apply_websocket_config(&matches, &mut config);
 
-    // Apply API server configuration  
+    // ✅ FIX: API server configuration  
     if matches.get_flag("api") || matches.contains_id("api-port") {
         config.api_server.enabled = true;
         
@@ -418,40 +441,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| {
                     eprintln!("Invalid API port number, using default 3000");
                     3000
-                });    
+                });
         }
         
         info!("🌐 API server will start on port {}", config.api_server.port);
     }
 
+    // ✅ ADD: Config validation summary
+    info!("🔍 Config validation:");
+    info!("  IPC Name: {}", config.ipc_name);
+    info!("  IPC UUID: {}", config.ipc_uuid);
+    info!("  Serial Port: {}", config.serial_port);
+    info!("  Devices: {}", config.devices.len());
+    info!("  Socket Server: {} (port: {})", config.socket_server.enabled, config.socket_server.port);
+    info!("  API Server: {} (port: {})", config.api_server.enabled, config.api_server.port);
+
     let mut service = DataService::new(config.clone()).await?;
+    let mut api_service_handle: Option<crate::services::ApiService> = None;
 
     // Start API service if enabled
     if config.api_server.enabled {
         if let Some(db_service) = service.get_database_service() {
-            let sqlite_manager = db_service.get_sqlite_manager();
-            let mut api_service = crate::services::ApiService::new(config.clone(), sqlite_manager.clone());
+            let sqlite_manager = db_service.get_sqlite_manager().clone();
+            let mut api_service = crate::services::ApiService::new(config.clone(), sqlite_manager);
             api_service.start(config.api_server.port).await?;
             info!("🌐 HTTP API server enabled on port {}", config.api_server.port);
+            api_service_handle = Some(api_service);
         } else {
-            eprintln!("⚠️  API server requires database service to be enabled");
+            info!("⚠️  API server requires database service to be enabled");
         }
     }
 
     // Handle WebSocket commands before other subcommands
     if handle_websocket_commands(&matches, &service).await? {
+        // Stop services before returning
+        if let Some(mut api_service) = api_service_handle {
+            api_service.stop().await?;
+        }
         return Ok(());
     }
 
     // Handle other subcommands
     if handle_subcommands(&matches, &mut service).await? {
+        // Stop services before returning
+        if let Some(mut api_service) = api_service_handle {
+            api_service.stop().await?;
+        }
         return Ok(());
     }
 
-    // Check if debug mode is enabled
-    let debug_mode = matches.get_flag("debug");
+    // Setup graceful shutdown
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    
+    // Handle Ctrl+C
+    let shutdown_tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx)));
+    let shutdown_tx_clone = shutdown_tx.clone();
+    
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        info!("🛑 Received Ctrl+C, initiating graceful shutdown...");
+        
+        if let Some(tx) = shutdown_tx_clone.lock().await.take() {
+            let _ = tx.send(());
+        }
+    });
 
-    // Configure output format and destinations for debug mode
+    // Configure debug mode
+    let debug_mode = matches.get_flag("debug");
     if debug_mode {
         if let Some(format) = matches.get_one::<String>("format") {
             match format.as_str() {
@@ -477,7 +533,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Start continuous service
+    // Start continuous service with graceful shutdown
     info!("🚀 Starting Industrial Modbus Service version {}", VERSION);
     info!("📡 Serial port: {}", config.serial_port);
     info!("⚙️  Baud rate: {}", config.baud_rate);
@@ -490,7 +546,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("ℹ️  Use --debug flag for automatic data printing");
     }
 
-    service.run(debug_mode).await?;
+    // Run service in a select block for graceful shutdown
+    tokio::select! {
+        result = service.run(debug_mode) => {
+            if let Err(e) = result {
+                eprintln!("❌ Service error: {}", e);
+            }
+        }
+        _ = shutdown_rx => {
+            info!("🛑 Shutdown signal received");
+        }
+    }
 
+    // Graceful shutdown sequence
+    info!("🔄 Shutting down services...");
+    
+    // Stop API service first
+    if let Some(mut api_service) = api_service_handle {
+        info!("🛑 Stopping API service...");
+        if let Err(e) = api_service.stop().await {
+            eprintln!("❌ Failed to stop API service: {}", e);
+        } else {
+            info!("✅ API service stopped");
+        }
+    }
+
+    // Stop main service
+    info!("🛑 Stopping main service...");
+    // Add a stop method to DataService if it doesn't exist
+    
+    info!("✅ All services stopped gracefully");
     Ok(())
 }

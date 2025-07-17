@@ -129,17 +129,27 @@ async fn handle_show_command(
         println!("───────────────────────────────────────────────────────────");
     }
 
-    // ✅ ADD: Socket Server Information
+    // ✅ FIX: Socket Server Information display
     println!("\n🔌 Socket Server Configuration:");
     println!("═══════════════════════════════════════");
     let socket_status = if config.socket_server.enabled { "✅ ENABLED" } else { "❌ DISABLED" };
     println!("   📡 Status: {}", socket_status);
     println!("   🔌 Port: {}", config.socket_server.port);
-    if let Some(max_clients) = config.socket_server.max_clients {
-        println!("   👥 Max Clients: {}", max_clients);
-    } else {
-        println!("   👥 Max Clients: Unlimited");
-    }
+    println!("   🏠 Host: {}", config.socket_server.host);
+    println!("   👥 Max Clients: {}", config.socket_server.max_clients); // ✅ FIX: Direct access, no Option
+    println!("   💓 Heartbeat: {} sec", config.socket_server.heartbeat_interval);
+    println!("   ⏰ Timeout: {} sec", config.socket_server.client_timeout);
+    println!("   🔄 Mode: {}", config.socket_server.mode);
+
+    // ✅ ADD: API Server Information if missing
+    println!("\n🌐 API Server Configuration:");
+    println!("═══════════════════════════════════════");
+    let api_status = if config.api_server.enabled { "✅ ENABLED" } else { "❌ DISABLED" };
+    println!("   📡 Status: {}", api_status);
+    println!("   🔌 Port: {}", config.api_server.port);
+    println!("   🏠 Host: {}", config.api_server.host);
+    println!("   🔒 CORS: {}", if config.api_server.cors_enabled { "Enabled" } else { "Disabled" });
+    println!("   🌍 Origins: {}", config.api_server.cors_origins.join(", "));
     
     Ok(true)
 }

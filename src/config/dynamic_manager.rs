@@ -452,15 +452,13 @@ impl DynamicConfigManager {
                             let old_value = config.socket_server.enabled.to_string();
                             config.socket_server.enabled = enabled;
                             
-                            // ✅ ADD: Signal service restart requirement for socket server changes
                             return Ok((true, format!("Socket server enabled set to: {}", enabled), 
-                                     Some(old_value), Some(value.clone()), true)); // Changed to true for restart
+                                     Some(old_value), Some(value.clone()), true));
                         }
                         "port" => {
                             let port = value.parse::<u16>().map_err(|_| 
                                 ModbusError::InvalidData("Invalid port number".to_string()))?;
                             
-                            // ✅ ADD: Port validation
                             if port < 1024 {
                                 return Ok((false, "Port must be >= 1024 for non-privileged operation".to_string(),
                                          None, None, false));
@@ -469,17 +467,28 @@ impl DynamicConfigManager {
                             let old_value = config.socket_server.port.to_string();
                             config.socket_server.port = port;
                             return Ok((true, format!("Socket server port set to: {}", port), 
-                                     Some(old_value), Some(value.clone()), true)); // Requires restart
+                                     Some(old_value), Some(value.clone()), true));
                         }
                         "max_clients" => {
                             let max_clients = value.parse::<usize>().map_err(|_| 
                                 ModbusError::InvalidData("Invalid max_clients value".to_string()))?;
                             
-                            let old_value = config.socket_server.max_clients
-                                .map(|v| v.to_string())
-                                .unwrap_or_else(|| "None".to_string());
-                            config.socket_server.max_clients = Some(max_clients);
+                            // ✅ FIX: Handle usize directly, not Option<usize>
+                            let old_value = config.socket_server.max_clients.to_string();
+                            config.socket_server.max_clients = max_clients;
                             return Ok((true, format!("Socket server max_clients set to: {}", max_clients), 
+                                     Some(old_value), Some(value.clone()), false));
+                        }
+                        "host" => {
+                            let old_value = config.socket_server.host.clone();
+                            config.socket_server.host = value.clone();
+                            return Ok((true, format!("Socket server host set to: {}", value), 
+                                     Some(old_value), Some(value.clone()), true));
+                        }
+                        "mode" => {
+                            let old_value = config.socket_server.mode.clone();
+                            config.socket_server.mode = value.clone();
+                            return Ok((true, format!("Socket server mode set to: {}", value), 
                                      Some(old_value), Some(value.clone()), false));
                         }
                         _ => return Err(ModbusError::InvalidData(format!("Unknown socket server parameter: {}", key))),

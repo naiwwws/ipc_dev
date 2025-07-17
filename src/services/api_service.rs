@@ -120,6 +120,7 @@ impl ApiService {
         })
         .bind(format!("0.0.0.0:{}", port))
         .map_err(|e| ModbusError::CommunicationError(format!("Failed to bind server: {}", e)))?
+        .shutdown_timeout(5) // Add shutdown timeout
         .run();
 
         let handle = server.handle();
@@ -136,10 +137,21 @@ impl ApiService {
     }
 
     pub async fn stop(&mut self) -> Result<(), ModbusError> {
-        if let Some(handle) = &self.server_handle {
-            handle.stop(true).await;
-            info!("🛑 HTTP API server stopped");
+        info!("🛑 Stopping HTTP API server...");
+        
+        if let Some(handle) = self.server_handle.take() {
+            // Use graceful shutdown with timeout
+            tokio::select! {
+                _ = handle.stop(true) => {
+                    info!("✅ HTTP API server stopped gracefully");
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {
+                    warn!("⚠️  HTTP API server shutdown timeout, forcing stop");
+                    handle.stop(false).await;
+                }
+            }
         }
+        
         Ok(())
     }
 

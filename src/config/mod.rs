@@ -14,8 +14,10 @@ pub use settings::{
     HttpOutputConfig,
     MqttOutputConfig,
     DatabaseOutputConfig,
-    SqliteConfig,  // Add this
-    RegisterConfig
+    SqliteConfig,
+    RegisterConfig,
+    SocketServerConfig,    // Add this
+    ApiServerConfig,       // Add this
 };
 pub use dynamic_manager::{
     DynamicConfigManager, 
