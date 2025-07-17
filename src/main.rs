@@ -318,23 +318,6 @@ fn build_cli() -> Command {
         )
 }
 
-fn apply_websocket_config(matches: &ArgMatches, config: &mut Config) {
-    if matches.get_flag("websocket") || matches.contains_id("websocket-port") {
-        config.socket_server.enabled = true;
-        config.socket_server.mode = "websocket".to_string();
-        
-        if let Some(port_str) = matches.get_one::<String>("websocket-port") {
-            config.socket_server.port = port_str.parse::<u16>().unwrap_or(8080);
-        }
-        
-        info!("🔌 WebSocket server enabled on port {}", config.socket_server.port);
-    }
-    
-    if matches.get_flag("disable-socket") {
-        config.socket_server.enabled = false;
-        info!("📝 Socket/WebSocket server disabled");
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -366,16 +349,98 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ✅ ENHANCE: Config loading with better error handling
+    // ✅ ENHANCED: Config loading with proper TOML precedence
     let config_file = matches.get_one::<String>("config-file").unwrap();
     
-    info!("🔍 Attempting to load config from: {}", config_file);
+    info!("🔍 Loading configuration from: {}", config_file);
     
     let mut config = if std::path::Path::new(config_file).exists() {
         info!("📁 Loading config from existing file: {}", config_file);
         match Config::from_file(config_file) {
-            Ok(config) => {
-                info!("✅ Successfully loaded config from file");
+            Ok(mut config) => {
+                info!("✅ Successfully loaded TOML config");
+                
+                // ✅ IMPORTANT: Only override TOML config if CLI flags are explicitly provided
+                // This preserves TOML settings when CLI flags aren't used
+                
+                // Override socket server config ONLY if CLI flags are provided
+                if matches.get_flag("socket") || matches.contains_id("socket-port") {
+                    info!("🔧 CLI override: Enabling socket server");
+                    config.socket_server.enabled = true;
+                    
+                    if let Some(port_str) = matches.get_one::<String>("socket-port") {
+                        config.socket_server.port = port_str.parse::<u16>()
+                            .unwrap_or_else(|_| {
+                                eprintln!("Invalid socket port number, using TOML/default");
+                                config.socket_server.port
+                            });
+                    }
+                } else {
+                    info!("📋 Using TOML socket server config: enabled={}, port={}", 
+                          config.socket_server.enabled, config.socket_server.port);
+                }
+
+                // Override WebSocket config ONLY if CLI flags are provided
+                if matches.get_flag("websocket") || matches.contains_id("websocket-port") {
+                    info!("🔧 CLI override: Enabling WebSocket server");
+                    config.socket_server.enabled = true;
+                    config.socket_server.mode = "websocket".to_string();
+                    
+                    if let Some(port_str) = matches.get_one::<String>("websocket-port") {
+                        config.socket_server.port = port_str.parse::<u16>()
+                            .unwrap_or_else(|_| {
+                                eprintln!("Invalid WebSocket port number, using TOML/default");
+                                config.socket_server.port
+                            });
+                    }
+                } else {
+                    info!("📋 Using TOML WebSocket config: enabled={}, port={}, mode={}", 
+                          config.socket_server.enabled, config.socket_server.port, config.socket_server.mode);
+                }
+
+                // Override API server config ONLY if CLI flags are provided
+                if matches.get_flag("api") || matches.contains_id("api-port") {
+                    info!("🔧 CLI override: Enabling API server");
+                    config.api_server.enabled = true;
+                    
+                    if let Some(port_str) = matches.get_one::<String>("api-port") {
+                        config.api_server.port = port_str.parse::<u16>()
+                            .unwrap_or_else(|_| {
+                                eprintln!("Invalid API port number, using TOML/default");
+                                config.api_server.port
+                            });
+                    }
+                } else {
+                    info!("📋 Using TOML API server config: enabled={}, port={}", 
+                          config.api_server.enabled, config.api_server.port);
+                }
+
+                // Override database config ONLY if CLI flags are provided
+                if matches.contains_id("output-db") {
+                    if let Some(db_connection) = matches.get_one::<String>("output-db") {
+                        info!("🔧 CLI override: Enabling database output");
+                        if config.output.database_output.is_none() {
+                            config.output.database_output = Some(crate::config::DatabaseOutputConfig::default());
+                        }
+                        config.output.database_output.as_mut().unwrap().enabled = true;
+                        
+                        // Parse database connection string
+                        if db_connection.starts_with("sqlite:") {
+                            let db_path = db_connection.strip_prefix("sqlite:").unwrap_or("data/sensor_data.db");
+                            config.output.database_output.as_mut().unwrap().sqlite_config.database_path = db_path.to_string();
+                        }
+                    }
+                } else {
+                    let db_enabled = config.output.database_output.as_ref().map(|db| db.enabled).unwrap_or(false);
+                    info!("📋 Using TOML database config: enabled={}", db_enabled);
+                }
+
+                // Handle disable-socket flag
+                if matches.get_flag("disable-socket") {
+                    info!("🔧 CLI override: Disabling socket/WebSocket server");
+                    config.socket_server.enabled = false;
+                }
+
                 config
             },
             Err(e) => {
@@ -414,62 +479,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config
     };
 
-    // ✅ FIX: Socket server configuration
-    if matches.get_flag("socket") || matches.contains_id("socket-port") {
-        config.socket_server.enabled = true;
-        
-        if let Some(port_str) = matches.get_one::<String>("socket-port") {
-            config.socket_server.port = port_str.parse::<u16>()
-                .unwrap_or_else(|_| {
-                    eprintln!("Invalid socket port number, using default 8080");
-                    8080
-                });
-        }
-        
-        info!("🔌 Socket server will start on port {}", config.socket_server.port);
-    }
-
-    // Apply WebSocket configuration
-    apply_websocket_config(&matches, &mut config);
-
-    // ✅ FIX: API server configuration  
-    if matches.get_flag("api") || matches.contains_id("api-port") {
-        config.api_server.enabled = true;
-        
-        if let Some(port_str) = matches.get_one::<String>("api-port") {
-            config.api_server.port = port_str.parse::<u16>()
-                .unwrap_or_else(|_| {
-                    eprintln!("Invalid API port number, using default 3000");
-                    3000
-                });
-        }
-        
-        info!("🌐 API server will start on port {}", config.api_server.port);
-    }
-
-    // ✅ ADD: Config validation summary
-    info!("🔍 Config validation:");
+    // ✅ ENHANCED: Config validation and display
+    info!("🔍 Final Configuration:");
     info!("  IPC Name: {}", config.ipc_name);
     info!("  IPC UUID: {}", config.ipc_uuid);
     info!("  Serial Port: {}", config.serial_port);
     info!("  Devices: {}", config.devices.len());
-    info!("  Socket Server: {} (port: {})", config.socket_server.enabled, config.socket_server.port);
-    info!("  API Server: {} (port: {})", config.api_server.enabled, config.api_server.port);
+    info!("  Socket Server: {} (port: {}, mode: {})", 
+          config.socket_server.enabled, config.socket_server.port, config.socket_server.mode);
+    info!("  API Server: {} (port: {})", 
+          config.api_server.enabled, config.api_server.port);
+    
+    let db_enabled = config.output.database_output.as_ref().map(|db| db.enabled).unwrap_or(false);
+    info!("  Database: {}", if db_enabled { "enabled" } else { "disabled" });
 
     let mut service = DataService::new(config.clone()).await?;
     let mut api_service_handle: Option<crate::services::ApiService> = None;
 
-    // Start API service if enabled
+    // ✅ FIXED: Start API service based on TOML config, not just CLI
     if config.api_server.enabled {
+        // ✅ ENSURE: Database is available for API service OR make it optional
         if let Some(db_service) = service.get_database_service() {
             let sqlite_manager = db_service.get_sqlite_manager().clone();
             let mut api_service = crate::services::ApiService::new(config.clone(), sqlite_manager);
             api_service.start(config.api_server.port).await?;
-            info!("🌐 HTTP API server enabled on port {}", config.api_server.port);
+            info!("🌐 HTTP API server started on port {} (from TOML config)", config.api_server.port);
             api_service_handle = Some(api_service);
         } else {
-            info!("⚠️  API server requires database service to be enabled");
+            // ✅ NEW: Allow API service without database for basic operations
+            info!("⚠️  Database not available for API service");
+            info!("💡 To enable full API functionality, ensure database is configured in TOML:");
+            info!("   [output.database_output]");
+            info!("   enabled = true");
         }
+    } else {
+        info!("📝 API server disabled in config");
     }
 
     // Handle WebSocket commands before other subcommands
@@ -509,31 +553,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure debug mode
     let debug_mode = matches.get_flag("debug");
     if debug_mode {
-        if let Some(format) = matches.get_one::<String>("format") {
-            match format.as_str() {
-                "json" => {
-                    info!("🎨 Using JSON formatter");
-                    service.set_formatter(Box::new(crate::output::JsonFormatter));
-                }
-                "csv" => {
-                    info!("🎨 Using CSV formatter");
-                    service.set_formatter(Box::new(crate::output::CsvFormatter));
-                }
-                "hex" => {
-                    info!("🔍 Using Hex formatter");
-                    service.set_formatter(Box::new(crate::output::HexFormatter));
-                }
-                _ => {} // Keep default console formatter
-            }
-        }
+        info!("🐛 Debug mode enabled - additional data output will be shown");
+    }
 
-        if let Some(output_file) = matches.get_one::<String>("output-file") {
-            info!("📝 Adding file output: {}", output_file);
-            service.add_sender(Box::new(crate::output::FileSender::new(output_file, true)));
+    // Configure output format if specified
+    if let Some(format) = matches.get_one::<String>("format") {
+        match format.as_str() {
+            "json" => {
+                info!("🎨 Using JSON formatter");
+                service.set_formatter(Box::new(crate::output::JsonFormatter));
+            }
+            "csv" => {
+                info!("🎨 Using CSV formatter");
+                service.set_formatter(Box::new(crate::output::CsvFormatter));
+            }
+            "hex" => {
+                info!("🔍 Using Hex formatter");
+                service.set_formatter(Box::new(crate::output::HexFormatter));
+            }
+            _ => {} // Keep default console formatter
         }
     }
 
-    // Start continuous service with graceful shutdown
+    if let Some(output_file) = matches.get_one::<String>("output-file") {
+        info!("📝 Adding file output: {}", output_file);
+        service.add_sender(Box::new(crate::output::FileSender::new(output_file, true)));
+    }
+
+    // Start continuous service
     info!("🚀 Starting Industrial Modbus Service version {}", VERSION);
     info!("📡 Serial port: {}", config.serial_port);
     info!("⚙️  Baud rate: {}", config.baud_rate);

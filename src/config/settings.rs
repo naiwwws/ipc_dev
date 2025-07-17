@@ -424,7 +424,6 @@ impl Config {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let path_ref = path.as_ref();
         
-        // ✅ ADD: Better error messages
         if !path_ref.exists() {
             return Err(format!("Config file does not exist: {}", path_ref.display()).into());
         }
@@ -439,23 +438,24 @@ impl Config {
         let mut config: Config = toml::from_str(&content)
             .map_err(|e| {
                 error!("❌ TOML parsing error in {}: {}", path_ref.display(), e);
+                error!("📝 Error details: {}", e);
                 format!("Invalid TOML syntax in {}: {}", path_ref.display(), e)
             })?;
         
-        // ✅ ENHANCE: Backward compatibility and validation
-        if config.ipc_uuid.is_empty() {
+        // ✅ ENHANCED: Backward compatibility and validation
+        if config.ipc_uuid.is_empty() || config.ipc_uuid == "auto-generated" {
             config.ipc_uuid = Uuid::new_v4().to_string();
-            warn!("🔧 Generated new IPC UUID: {}", config.ipc_uuid);
+            info!("🔧 Generated new IPC UUID: {}", config.ipc_uuid);
         }
         
         if config.ipc_name.is_empty() {
             config.ipc_name = "Industrial Data Collector".to_string();
-            warn!("🔧 Set default IPC name: {}", config.ipc_name);
+            info!("🔧 Set default IPC name: {}", config.ipc_name);
         }
         
         if config.ipc_version.is_empty() {
             config.ipc_version = crate::VERSION.to_string();
-            warn!("🔧 Set IPC version: {}", config.ipc_version);
+            info!("🔧 Set IPC version: {}", config.ipc_version);
         }
         
         // ✅ ENSURE: device_addresses sync
@@ -464,13 +464,25 @@ impl Config {
         // ✅ VALIDATE: Socket server config
         if config.socket_server.max_clients == 0 {
             config.socket_server.max_clients = 100;
-            warn!("🔧 Set default max_clients: 100");
+            info!("🔧 Set default max_clients: 100");
+        }
+        
+        // ✅ AUTO-GENERATE: Device UUIDs if needed
+        for device in &mut config.devices {
+            if device.uuid.is_empty() || device.uuid == "auto-generated" {
+                device.uuid = Uuid::new_v4().to_string();
+                info!("🔧 Generated UUID for device '{}': {}", device.name, device.uuid);
+            }
         }
         
         info!("✅ Successfully loaded config from: {}", path_ref.display());
         info!("   - Devices: {}", config.devices.len());
-        info!("   - Socket Server: {}", if config.socket_server.enabled { "enabled" } else { "disabled" });
-        info!("   - API Server: {}", if config.api_server.enabled { "enabled" } else { "disabled" });
+        info!("   - Socket Server: {} (port: {}, mode: {})", 
+              config.socket_server.enabled, config.socket_server.port, config.socket_server.mode);
+        info!("   - API Server: {} (port: {})", 
+              config.api_server.enabled, config.api_server.port);
+        let db_enabled = config.output.database_output.as_ref().map(|db| db.enabled).unwrap_or(false);
+        info!("   - Database: {}", if db_enabled { "enabled" } else { "disabled" });
         
         Ok(config)
     }
