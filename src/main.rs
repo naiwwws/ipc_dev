@@ -129,6 +129,18 @@ fn build_cli() -> Command {
                 .action(clap::ArgAction::SetTrue)
                 .help("Disable all socket/websocket servers"),
         )
+        .arg(
+            Arg::new("api-port")
+                .long("api-port")
+                .value_name("PORT")
+                .help("Enable HTTP API server on specified port (default: 3000)"),
+        )
+        .arg(
+            Arg::new("api")
+                .long("api")
+                .action(clap::ArgAction::SetTrue)
+                .help("Enable HTTP API server on default port (3000)"),
+        )
         .subcommand(
             Command::new("getdata")
                 .about("Get all device data")
@@ -396,8 +408,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Apply WebSocket configuration
     apply_websocket_config(&matches, &mut config);
-    
+
+    // Apply API server configuration  
+    if matches.get_flag("api") || matches.contains_id("api-port") {
+        config.api_server.enabled = true;
+        
+        if let Some(port_str) = matches.get_one::<String>("api-port") {
+            config.api_server.port = port_str.parse::<u16>()
+                .unwrap_or_else(|_| {
+                    eprintln!("Invalid API port number, using default 3000");
+                    3000
+                });    
+        }
+        
+        info!("🌐 API server will start on port {}", config.api_server.port);
+    }
+
     let mut service = DataService::new(config.clone()).await?;
+
+    // Start API service if enabled
+    if config.api_server.enabled {
+        if let Some(db_service) = service.get_database_service() {
+            let sqlite_manager = db_service.get_sqlite_manager();
+            let mut api_service = crate::services::ApiService::new(config.clone(), sqlite_manager.clone());
+            api_service.start(config.api_server.port).await?;
+            info!("🌐 HTTP API server enabled on port {}", config.api_server.port);
+        } else {
+            eprintln!("⚠️  API server requires database service to be enabled");
+        }
+    }
 
     // Handle WebSocket commands before other subcommands
     if handle_websocket_commands(&matches, &service).await? {

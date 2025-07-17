@@ -53,3 +53,82 @@ impl FlowmeterReading {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Transaction {
+    pub id: Option<i64>,
+    pub transaction_id: String,
+    pub flow_type: String,
+    pub vessel_id: String,
+    pub vessel_name: String,
+    pub vessel_type: String,
+    pub liquid_target_volume: f32,
+    pub liquid_type: String,
+    pub liquid_density_min: f32,
+    pub liquid_density_max: f32,
+    pub liquid_water_content_min: f32,
+    pub liquid_water_content_max: f32,
+    pub liquid_residual_carbon_min: f32,
+    pub liquid_residual_carbon_max: f32,
+    pub operator_full_name: String,
+    pub operator_email: String,
+    pub operator_phone_number: Option<String>,
+    pub customer_vessel_name: Option<String>,
+    pub customer_pic_name: Option<String>,
+    pub customer_location_name: Option<String>,
+    pub supplier_name: Option<String>,
+    pub created_at: i64, // Unix timestamp
+    pub status: String,
+}
+
+impl Transaction {
+    pub fn new(
+        transaction_id: String,
+        flow_type: String,
+        vessel_id: String,
+        vessel_name: String,
+        vessel_type: String,
+        liquid_target_volume: f32,
+        liquid_type: String,
+        liquid_density_min: f32,
+        liquid_density_max: f32,
+        liquid_water_content_min: f32,
+        liquid_water_content_max: f32,
+        liquid_residual_carbon_min: f32,
+        liquid_residual_carbon_max: f32,
+        operator_full_name: String,
+        operator_email: String,
+        operator_phone_number: Option<String>,
+        customer_vessel_name: Option<String>,
+        customer_pic_name: Option<String>,
+        customer_location_name: Option<String>,
+        supplier_name: Option<String>,
+        status: String,
+    ) -> Self {
+        Self {
+            id: None,
+            transaction_id,
+            flow_type,
+            vessel_id,
+            vessel_name,
+            vessel_type,
+            liquid_target_volume,
+            liquid_type,
+            liquid_density_min,
+            liquid_density_max,
+            liquid_water_content_min,
+            liquid_water_content_max,
+            liquid_residual_carbon_min,
+            liquid_residual_carbon_max,
+            operator_full_name,
+            operator_email,
+            operator_phone_number,
+            customer_vessel_name,
+            customer_pic_name,
+            customer_location_name,
+            supplier_name,
+            created_at: Utc::now().timestamp(),
+            status,
+        }
+    }
+}

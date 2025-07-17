@@ -4,7 +4,6 @@ use anyhow::{Result, anyhow}; //  Add anyhow macro import
 
 use crate::services::DataService;
 use crate::output::{JsonFormatter, CsvFormatter, FileSender, MqttSender};
-use crate::output::raw_sender::{RawDataSender, RawDataFormat};
 
 pub async fn handle_subcommands(
     matches: &ArgMatches,

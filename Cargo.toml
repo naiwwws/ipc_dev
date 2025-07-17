@@ -23,3 +23,4 @@ base64 = "0.21"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
 tokio-tungstenite = "0.20"
 futures-util = "0.3"
+actix-web = "4.4"

@@ -142,4 +142,9 @@ impl DatabaseService {
         info!("🛑 Database service stopped");
         Ok(())
     }
+
+    // NEW: Method to get SqliteManager for API service
+    pub fn get_sqlite_manager(&self) -> &SqliteManager {
+        &self.sqlite_manager
+    }
 }

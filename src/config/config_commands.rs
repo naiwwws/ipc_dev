@@ -1,11 +1,10 @@
 use clap::ArgMatches;
-use log::{info, error};
 use std::collections::HashMap;
 use uuid::Uuid;
 use chrono::Utc;
 
 use crate::config::dynamic_manager::{DynamicConfigManager, ConfigurationCommand, ConfigCommandType, ConfigTarget};
-use crate::config::{DatabaseOutputConfig}; // Add this import
+ // Add this import
 
 pub async fn handle_config_commands(
     matches: &ArgMatches,
@@ -336,7 +335,7 @@ async fn handle_set_command(
             println!("⚠️  Warning: Failed to save to TOML file: {}", e);
             println!("💡 Changes are active but won't persist after restart");
         } else {
-            println!("💾 Configuration saved to setup/default.toml");
+            println!("� Configuration saved to setup/default.toml");
         }
     } else {
         println!("❌ Failed to update configuration: {}", response.message);

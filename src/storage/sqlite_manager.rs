@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use crate::config::settings::SqliteConfig;
-use crate::storage::models::{FlowmeterReading, FlowmeterStats};
+use crate::storage::models::{FlowmeterReading, FlowmeterStats, Transaction};
 use crate::utils::error::ModbusError;
 
 #[derive(Clone)]
@@ -84,9 +84,9 @@ impl SqliteManager {
         Ok(manager)
     }
 
-    // Update the schema to use consistent field names
+    // Update the schema to include transactions table
     async fn initialize_schema(&self) -> Result<(), ModbusError> {
-        info!("🔧 Initializing minimal database schema...");
+        info!("🔧 Initializing database schema...");
 
         // MINIMAL: Single optimized table with consistent field names
         sqlx::query(r#"
@@ -108,18 +108,53 @@ impl SqliteManager {
         .execute(&self.pool)
         .await?;
 
+        // NEW: Transactions table for API service
+        sqlx::query(r#"
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                transaction_id TEXT UNIQUE NOT NULL,
+                flow_type TEXT NOT NULL,
+                vessel_id TEXT NOT NULL,
+                vessel_name TEXT NOT NULL,
+                vessel_type TEXT NOT NULL,
+                liquid_target_volume REAL NOT NULL,
+                liquid_type TEXT NOT NULL,
+                liquid_density_min REAL NOT NULL,
+                liquid_density_max REAL NOT NULL,
+                liquid_water_content_min REAL NOT NULL,
+                liquid_water_content_max REAL NOT NULL,
+                liquid_residual_carbon_min REAL NOT NULL,
+                liquid_residual_carbon_max REAL NOT NULL,
+                operator_full_name TEXT NOT NULL,
+                operator_email TEXT NOT NULL,
+                operator_phone_number TEXT,
+                customer_vessel_name TEXT,
+                customer_pic_name TEXT,
+                customer_location_name TEXT,
+                supplier_name TEXT,
+                created_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'confirmed'
+            )
+        "#)
+        .execute(&self.pool)
+        .await?;
+
         // MINIMAL: Only essential indexes
         self.create_minimal_indexes().await?;
 
-        info!("✅ Minimal database schema initialized");
+        info!("✅ Database schema initialized");
         Ok(())
     }
 
     async fn create_minimal_indexes(&self) -> Result<(), ModbusError> {
         let indexes = vec![
-            // Only 2 essential indexes - use consistent field name
+            // Flowmeter indexes
             "CREATE INDEX IF NOT EXISTS idx_timestamp ON flowmeter_readings(unix_timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_device_time ON flowmeter_readings(device_address, unix_timestamp)",
+            // Transaction indexes
+            "CREATE INDEX IF NOT EXISTS idx_transaction_id ON transactions(transaction_id)",
+            "CREATE INDEX IF NOT EXISTS idx_transaction_vessel ON transactions(vessel_id)",
+            "CREATE INDEX IF NOT EXISTS idx_transaction_created ON transactions(created_at)",
         ];
 
         for index_sql in indexes {
@@ -128,7 +163,86 @@ impl SqliteManager {
                 .await?;
         }
 
-        info!("✅ Minimal database indexes created");
+        info!("✅ Database indexes created");
+        Ok(())
+    }
+
+    // NEW: Transaction management methods
+    pub async fn insert_transaction(&self, transaction: &Transaction) -> Result<i64, ModbusError> {
+        let result = sqlx::query(r#"
+            INSERT INTO transactions (
+                transaction_id, flow_type, vessel_id, vessel_name, vessel_type,
+                liquid_target_volume, liquid_type, liquid_density_min, liquid_density_max,
+                liquid_water_content_min, liquid_water_content_max,
+                liquid_residual_carbon_min, liquid_residual_carbon_max,
+                operator_full_name, operator_email, operator_phone_number,
+                customer_vessel_name, customer_pic_name, customer_location_name,
+                supplier_name, created_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#)
+        .bind(&transaction.transaction_id)
+        .bind(&transaction.flow_type)
+        .bind(&transaction.vessel_id)
+        .bind(&transaction.vessel_name)
+        .bind(&transaction.vessel_type)
+        .bind(transaction.liquid_target_volume)
+        .bind(&transaction.liquid_type)
+        .bind(transaction.liquid_density_min)
+        .bind(transaction.liquid_density_max)
+        .bind(transaction.liquid_water_content_min)
+        .bind(transaction.liquid_water_content_max)
+        .bind(transaction.liquid_residual_carbon_min)
+        .bind(transaction.liquid_residual_carbon_max)
+        .bind(&transaction.operator_full_name)
+        .bind(&transaction.operator_email)
+        .bind(&transaction.operator_phone_number)
+        .bind(&transaction.customer_vessel_name)
+        .bind(&transaction.customer_pic_name)
+        .bind(&transaction.customer_location_name)
+        .bind(&transaction.supplier_name)
+        .bind(transaction.created_at)
+        .bind(&transaction.status)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn get_transaction_by_id(&self, transaction_id: &str) -> Result<Option<Transaction>, ModbusError> {
+        let transaction = sqlx::query_as::<_, Transaction>(
+            "SELECT * FROM transactions WHERE transaction_id = ?"
+        )
+        .bind(transaction_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(transaction)
+    }
+
+    pub async fn get_all_transactions(&self, limit: Option<i64>, offset: Option<i64>) -> Result<Vec<Transaction>, ModbusError> {
+        let mut query = "SELECT * FROM transactions ORDER BY created_at DESC".to_string();
+        
+        if let Some(limit_val) = limit {
+            query.push_str(&format!(" LIMIT {}", limit_val));
+            if let Some(offset_val) = offset {
+                query.push_str(&format!(" OFFSET {}", offset_val));
+            }
+        }
+
+        let transactions = sqlx::query_as::<_, Transaction>(&query)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(transactions)
+    }
+
+    pub async fn update_transaction_status(&self, transaction_id: &str, status: &str) -> Result<(), ModbusError> {
+        sqlx::query("UPDATE transactions SET status = ? WHERE transaction_id = ?")
+            .bind(status)
+            .bind(transaction_id)
+            .execute(&self.pool)
+            .await?;
+
         Ok(())
     }
 
@@ -167,7 +281,7 @@ impl SqliteManager {
             return Ok(0);
         }
 
-        let batch_size = self.config.batch_size.max(500); // Increase batch size
+        let batch_size = self.config.batch_size.max(500);
         let mut total_inserted = 0;
 
         for chunk in readings.chunks(batch_size) {
@@ -175,16 +289,14 @@ impl SqliteManager {
             total_inserted += inserted;
         }
 
-        info!("💾 Inserted {} minimal flowmeter readings", total_inserted);
+        info!("💾 Inserted {} flowmeter readings", total_inserted);
         Ok(total_inserted)
     }
 
-    // MINIMAL: Optimized chunk insert with consistent field names
     async fn insert_minimal_chunk(&self, readings: &[FlowmeterReading]) -> Result<usize, ModbusError> {
         let mut tx = self.pool.begin().await?;
         let mut inserted_count = 0;
 
-        // Use prepared statement for efficiency
         for reading in readings {
             let result = sqlx::query(r#"
                 INSERT INTO flowmeter_readings (
@@ -213,7 +325,6 @@ impl SqliteManager {
         Ok(inserted_count)
     }
 
-    // MINIMAL: Get recent readings - fix field name
     pub async fn get_recent_flowmeter_readings(&self, limit: i64, offset: i64) -> Result<Vec<FlowmeterReading>, ModbusError> {
         let readings = sqlx::query_as::<_, FlowmeterReading>(r#"
             SELECT * FROM flowmeter_readings 
@@ -228,7 +339,6 @@ impl SqliteManager {
         Ok(readings)
     }
 
-    // MINIMAL: Get device readings - fix field name
     pub async fn get_device_flowmeter_readings(
         &self, 
         device_address: u8, 
@@ -268,7 +378,6 @@ impl SqliteManager {
         Ok(readings)
     }
 
-    // MINIMAL: Get stats - fix field name
     pub async fn get_flowmeter_stats(&self) -> Result<FlowmeterStats, ModbusError> {
         let stats = sqlx::query_as::<_, FlowmeterStats>(r#"
             SELECT 
@@ -287,7 +396,6 @@ impl SqliteManager {
         Ok(stats)
     }
 
-    // AGGRESSIVE: Cleanup old data - fix field name
     pub async fn cleanup_old_data(&self, hours_to_keep: i64) -> Result<u64, ModbusError> {
         let cutoff_timestamp = (Utc::now() - chrono::Duration::hours(hours_to_keep)).timestamp();
         
@@ -296,21 +404,18 @@ impl SqliteManager {
             .execute(&self.pool)
             .await?;
 
-        // Aggressive vacuum
         sqlx::query("VACUUM").execute(&self.pool).await?;
 
         info!("🧹 Cleaned up {} old records", result.rows_affected());
         Ok(result.rows_affected())
     }
 
-    // Close all connections gracefully
     pub async fn close(&self) {
         info!("🔒 Closing SQLite database connections");
         self.pool.close().await;
     }
 }
 
-// KEEP DatabaseStats here but export it
 #[derive(Debug)]
 pub struct DatabaseStats {
     pub total_readings: i64,

@@ -41,6 +41,9 @@ pub struct Config {
 
     // ✅ ADD: Socket server configuration
     pub socket_server: SocketServerConfig,
+
+    // ADD: API server configuration
+    pub api_server: ApiServerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,7 +161,7 @@ impl Default for FileOutputConfig {
 impl Default for DatabaseOutputConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             sqlite_config: SqliteConfig::default(),
             batch_size: 100,
             flush_interval_seconds: 60,
@@ -177,10 +180,32 @@ pub struct SocketServerConfig {
 impl Default for SocketServerConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             port: 1234,
             max_clients: Some(10),
             mode: "websocket".to_string(), // Default to WebSocket
+        }
+    }
+}
+
+// NEW: API server configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiServerConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub host: String,
+    pub cors_enabled: bool,
+    pub cors_origins: Vec<String>,
+}
+
+impl Default for ApiServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 3000,
+            host: "0.0.0.0".to_string(),
+            cors_enabled: true,
+            cors_origins: vec!["*".to_string()],
         }
     }
 }
@@ -334,6 +359,9 @@ impl Default for Config {
 
             // Socket server configuration
             socket_server: SocketServerConfig::default(),
+
+            // API server configuration
+            api_server: ApiServerConfig::default(),
         }
     }
 }
