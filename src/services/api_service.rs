@@ -3,10 +3,12 @@ use log::{info, error, warn};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::utils::error::ModbusError;
 use crate::storage::{SqliteManager, Transaction};
+use crate::services::data_service::DataService; // FIXED: Updated import path
 
 // Transaction flow types
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -76,13 +78,15 @@ pub struct ErrorResponse {
 pub struct ApiServiceState {
     pub sqlite_manager: SqliteManager,
     pub config: Config,
+    pub data_service: Option<Arc<DataService>>, // NEW field
 }
 
 impl ApiServiceState {
-    pub fn new(config: Config, sqlite_manager: SqliteManager) -> Self {
+    pub fn new(config: Config, sqlite_manager: SqliteManager, data_service: Option<Arc<DataService>>) -> Self {
         Self {
             sqlite_manager,
             config,
+            data_service,
         }
     }
 }
@@ -96,7 +100,7 @@ pub struct ApiService {
 impl ApiService {
     pub fn new(config: Config, sqlite_manager: SqliteManager) -> Self {
         Self {
-            state: ApiServiceState::new(config, sqlite_manager),
+            state: ApiServiceState::new(config, sqlite_manager, None),
             server_handle: None,
         }
     }
@@ -214,10 +218,22 @@ async fn create_new_transaction(
             info!("✅ Transaction created successfully: {} for vessel: {}", 
                   transaction_id, request.vessel_name);
 
+            // NEW: Start volume-based transaction tracking in DataService
+            if let Some(data_service) = &state.data_service {
+                data_service.start_transaction_with_volume(
+                    transaction_id.clone(),
+                    request.liquid_target_volume,
+                    request.vessel_name.clone()
+                ).await;
+                info!("🎯 Started volume tracking for transaction: {} (target: {:.2} L)", 
+                      transaction_id, request.liquid_target_volume);
+            }
+
             Ok(HttpResponse::Ok().json(TransactionResponse {
                 success: true,
                 transaction_id,
-                message: format!("Transaction confirmed for vessel: {}", request.vessel_name),
+                message: format!("Transaction confirmed for vessel: {} (target volume: {:.2} L)", 
+                               request.vessel_name, request.liquid_target_volume),
                 timestamp: Utc::now(),
                 flow_type: request.flow_type.clone(),
                 vessel_id: request.vessel_id.clone(),

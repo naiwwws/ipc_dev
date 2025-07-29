@@ -88,21 +88,24 @@ impl SqliteManager {
     async fn initialize_schema(&self) -> Result<(), ModbusError> {
         info!("🔧 Initializing database schema...");
 
-        // MINIMAL: Single optimized table with consistent field names
+        // Updated flowmeter_readings table with transaction_id
         sqlx::query(r#"
             CREATE TABLE IF NOT EXISTS flowmeter_readings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 device_address INTEGER NOT NULL,
                 unix_timestamp INTEGER NOT NULL,
                 
-                -- Core measurements (24 bytes total)
+                -- Core measurements
                 mass_flow_rate REAL NOT NULL,
                 density_flow REAL NOT NULL,
                 temperature REAL NOT NULL,
                 volume_flow_rate REAL NOT NULL,
                 mass_total REAL NOT NULL,
                 volume_total REAL NOT NULL,
-                error_code INTEGER NOT NULL DEFAULT 0
+                error_code INTEGER NOT NULL DEFAULT 0,
+                
+                -- NEW: Transaction linking
+                transaction_id TEXT
             )
         "#)
         .execute(&self.pool)
@@ -301,8 +304,9 @@ impl SqliteManager {
             let result = sqlx::query(r#"
                 INSERT INTO flowmeter_readings (
                     device_address, unix_timestamp, mass_flow_rate, density_flow, 
-                    temperature, volume_flow_rate, mass_total, volume_total, error_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    temperature, volume_flow_rate, mass_total, volume_total, error_code,
+                    transaction_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#)
             .bind(reading.device_address)
             .bind(reading.unix_timestamp)
@@ -313,6 +317,7 @@ impl SqliteManager {
             .bind(reading.mass_total)
             .bind(reading.volume_total)
             .bind(reading.error_code)
+            .bind(&reading.transaction_id)
             .execute(&mut *tx)
             .await;
 

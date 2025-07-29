@@ -19,6 +19,9 @@ pub struct FlowmeterReading {
     pub mass_total: f32,
     pub volume_total: f32,
     pub error_code: u16,
+    
+    // NEW: Transaction linking
+    pub transaction_id: Option<String>,
 }
 
 // Keep minimal stats structure
@@ -38,6 +41,7 @@ impl FlowmeterReading {
     pub fn from_flowmeter_data(
         device_address: u8,
         flowmeter_data: &crate::devices::flowmeter::FlowmeterData,
+        transaction_id: Option<String>,
     ) -> Self {
         Self {
             id: None,
@@ -50,6 +54,7 @@ impl FlowmeterReading {
             mass_total: flowmeter_data.mass_total,
             volume_total: flowmeter_data.volume_total,
             error_code: flowmeter_data.error_code,
+            transaction_id,
         }
     }
 }

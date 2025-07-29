@@ -26,12 +26,22 @@ pub struct DataService {
     senders: Vec<Box<dyn DataSender>>,
     database_service: Option<DatabaseService>,
     websocket_server: Option<Arc<WebSocketServer>>,
-    // ADD: Missing streaming state fields
     streaming_clients: Arc<TokioMutex<usize>>,
     polling_handle: Arc<TokioMutex<Option<tokio::task::JoinHandle<()>>>>,
+    
+    // NEW: Transaction tracking with volume monitoring
+    active_transaction: Arc<TokioMutex<Option<ActiveTransaction>>>,
 }
 
-// KEEP: Clone implementation ABOVE the main impl block (this one is correct)
+// NEW: Structure to track active transaction with volume
+#[derive(Debug, Clone)]
+struct ActiveTransaction {
+    transaction_id: String,
+    target_volume: f32,
+    current_volume: f32,
+    vessel_name: String,
+}
+
 impl Clone for DataService {
     fn clone(&self) -> Self {
         // Create new devices vector by recreating them from config
@@ -60,6 +70,7 @@ impl Clone for DataService {
             websocket_server: self.websocket_server.clone(),
             streaming_clients: self.streaming_clients.clone(),
             polling_handle: self.polling_handle.clone(),
+            active_transaction: self.active_transaction.clone(), // NEW field
         }
     }
 }
@@ -152,6 +163,7 @@ impl DataService {
             websocket_server: websocket_server.as_ref().map(|(server, _)| server.clone()),
             streaming_clients: Arc::new(TokioMutex::new(0)),
             polling_handle: Arc::new(TokioMutex::new(None)),
+            active_transaction: Arc::new(TokioMutex::new(None)), // NEW field
         };
 
         // Start WebSocket request handler if WebSocket is enabled
@@ -397,6 +409,21 @@ impl DataService {
         request_id: String
     ) -> Result<(), ModbusError> {
         info!("🛑 Processing stop streaming request for client {}", client_id);
+        
+        // Clear active transaction when streaming stops
+        {
+            let mut active_tx = self.active_transaction.lock().await;
+            if let Some(tx) = active_tx.take() {
+                info!("🔗 Cleared active transaction {} (streaming stopped)", tx.transaction_id);
+                
+                // Update transaction status to 'cancelled' if not completed
+                if let Some(db_service) = &self.database_service {
+                    if let Err(e) = db_service.update_transaction_status(&tx.transaction_id, "cancelled").await {
+                        error!("❌ Failed to update transaction status: {}", e);
+                    }
+                }
+            }
+        }
         
         // Decrement streaming clients counter and stop polling if no clients left
         let should_stop_polling = {
@@ -915,7 +942,7 @@ impl DataService {
         let interval_duration = tokio::time::Duration::from_secs(service.config.update_interval_seconds);
         let mut interval = tokio::time::interval(interval_duration);
 
-        info!("🔄 Started flowmeter polling loop");
+        info!("🔄 Started flowmeter polling loop with volume-based transaction tracking");
 
         loop {
             interval.tick().await;
@@ -935,26 +962,62 @@ impl DataService {
                 
                 match device.read_data(service.modbus_client.as_ref()).await {
                     Ok(data) => {
-                        // Store in memory
-                        if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
-                            if let Ok(mut device_data) = service.device_data.lock() {
-                                device_data.insert(uuid.clone(), data.as_ref().clone_box());
-                            }
-                        }
+                        // Calculate volume delta from previous reading
+                        let current_volume = data.get_parameters_as_floats()
+                            .get("VolumeTotal")
+                            .copied()
+                            .unwrap_or(0.0);
                         
-                        // Store to database if enabled
+                        // Get previous volume for delta calculation
+                        let volume_delta = if let Ok(device_data_map) = service.device_data.lock() {
+                            if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
+                                if let Some(prev_data) = device_data_map.get(uuid) {
+                                    let prev_volume = prev_data.get_parameters_as_floats()
+                                        .get("VolumeTotal")
+                                        .copied()
+                                        .unwrap_or(0.0);
+                                    current_volume - prev_volume
+                                } else {
+                                    0.0 // First reading
+                                }
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            0.0
+                        };
+
+                        // Update transaction volume and get current transaction ID
+                        let active_transaction_id = if volume_delta > 0.0 {
+                            service.update_transaction_volume(volume_delta).await
+                        } else {
+                            service.get_active_transaction_id().await
+                        };
+                        
+                        // Store to database with transaction ID (if active and volume not reached)
                         if let Some(db_service) = &service.database_service {
                             if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
-                                if let Err(e) = db_service.store_device_data(uuid, addr, data.as_ref()).await {
+                                if let Err(e) = db_service.store_device_data_with_transaction(
+                                    uuid, 
+                                    addr, 
+                                    data.as_ref(),
+                                    active_transaction_id.clone()
+                                ).await {
                                     error!("❌ Failed to store device {} data: {}", addr, e);
                                 }
                             }
                         }
                         
-                        // Send to WebSocket clients
+                        // Update device data cache
+                        if let Ok(mut device_data_map) = service.device_data.lock() {
+                            if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
+                                device_data_map.insert(uuid.clone(), data.clone_box());
+                            }
+                        }
+                        
+                        // Send to WebSocket clients with transaction ID
                         if let Some(ws_server) = &service.websocket_server {
-                            // Create flowmeter data message
-                            let message = json!({
+                            let mut message = json!({
                                 "endpoint": "/flowmeter/read",
                                 "type": "flowmeter_data",
                                 "device_address": addr,
@@ -962,6 +1025,21 @@ impl DataService {
                                 "timestamp": chrono::Utc::now().timestamp(),
                                 "data": data.get_parameters_as_floats()
                             });
+                            
+                            // Add transaction info if active
+                            if let Some(tx_id) = &active_transaction_id {
+                                message["transaction_id"] = json!(tx_id);
+                                
+                                // Add progress info
+                                if let Some(active_tx) = service.active_transaction.lock().await.as_ref() {
+                                    message["transaction_progress"] = json!({
+                                        "current_volume": active_tx.current_volume,
+                                        "target_volume": active_tx.target_volume,
+                                        "progress_percentage": (active_tx.current_volume / active_tx.target_volume) * 100.0,
+                                        "vessel_name": active_tx.vessel_name
+                                    });
+                                }
+                            }
                             
                             if let Err(e) = ws_server.broadcast_to_endpoint("/flowmeter/read", &message).await {
                                 error!("❌ Failed to send data to WebSocket clients: {}", e);
@@ -1065,5 +1143,76 @@ impl DataService {
         }
         
         info!("🛑 WebSocket request handler stopped");
+    }
+
+    // NEW: Method to start transaction with volume tracking
+    pub async fn start_transaction_with_volume(&self, transaction_id: String, target_volume: f32, vessel_name: String) {
+        let mut active_tx = self.active_transaction.lock().await;
+        *active_tx = Some(ActiveTransaction {
+            transaction_id: transaction_id.clone(),
+            target_volume,
+            current_volume: 0.0,
+            vessel_name: vessel_name.clone(),
+        });
+        
+        info!("🔗 Started transaction {} for vessel '{}' with target volume: {:.2} L", 
+              transaction_id, vessel_name, target_volume);
+    }
+
+    // NEW: Method to get current active transaction ID (only if volume not reached)
+    pub async fn get_active_transaction_id(&self) -> Option<String> {
+        if let Some(active_tx) = self.active_transaction.lock().await.as_ref() {
+            if active_tx.current_volume < active_tx.target_volume {
+                Some(active_tx.transaction_id.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    // NEW: Method to update volume and check if target reached
+    async fn update_transaction_volume(&self, volume_delta: f32) -> Option<String> {
+        let mut active_tx_guard = self.active_transaction.lock().await;
+        
+        if let Some(active_tx) = active_tx_guard.as_mut() {
+            let old_volume = active_tx.current_volume;
+            active_tx.current_volume += volume_delta;
+            
+            let progress_percentage = (active_tx.current_volume / active_tx.target_volume) * 100.0;
+            
+            info!("📊 Transaction {} volume progress: {:.2}/{:.2} L ({:.1}%)", 
+                  active_tx.transaction_id, active_tx.current_volume, active_tx.target_volume, progress_percentage);
+            
+            // Check if target volume reached
+            if old_volume < active_tx.target_volume && active_tx.current_volume >= active_tx.target_volume {
+                let completed_tx_id = active_tx.transaction_id.clone();
+                let vessel_name = active_tx.vessel_name.clone();
+                
+                info!("🎯 Transaction {} for vessel '{}' COMPLETED! Target volume {:.2} L reached", 
+                      completed_tx_id, vessel_name, active_tx.target_volume);
+                
+                // Update transaction status in database
+                if let Some(db_service) = &self.database_service {
+                    if let Err(e) = db_service.update_transaction_status(&completed_tx_id, "completed").await {
+                        error!("❌ Failed to update transaction status: {}", e);
+                    }
+                }
+                
+                // Clear active transaction
+                *active_tx_guard = None;
+                return Some(completed_tx_id);
+            }
+            
+            // Return transaction ID if still active
+            if active_tx.current_volume < active_tx.target_volume {
+                Some(active_tx.transaction_id.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }

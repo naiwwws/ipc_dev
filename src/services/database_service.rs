@@ -39,19 +39,41 @@ impl DatabaseService {
         })
     }
 
-    // MINIMAL: Store only essential device data
-    pub async fn store_device_data(
+    // NEW: Store device data with transaction ID (volume-based)
+    pub async fn store_device_data_with_transaction(
         &self,
-        _device_uuid: &str,  // Ignored
+        _device_uuid: &str,
         device_address: u8,
         device_data: &dyn DeviceData,
+        transaction_id: Option<String>,
     ) -> Result<(), ModbusError> {
         // Only process flowmeter data
         if let Some(flowmeter_data) = device_data.as_any().downcast_ref::<crate::devices::flowmeter::FlowmeterData>() {
-            let reading = FlowmeterReading::from_flowmeter_data(device_address, flowmeter_data);
+            let reading = FlowmeterReading::from_flowmeter_data(
+                device_address, 
+                flowmeter_data,
+                transaction_id.clone()
+            );
+            
+            // Log transaction association
+            if let Some(tx_id) = &transaction_id {
+                debug!("💾 Storing reading with transaction ID: {} (volume: {:.2} L)", 
+                       tx_id, flowmeter_data.volume_total);
+            }
+            
             self.add_flowmeter_to_batch(vec![reading]).await?;
         }
         Ok(())
+    }
+
+    // Keep existing method for backward compatibility
+    pub async fn store_device_data(
+        &self,
+        device_uuid: &str,
+        device_address: u8,
+        device_data: &dyn DeviceData,
+    ) -> Result<(), ModbusError> {
+        self.store_device_data_with_transaction(device_uuid, device_address, device_data, None).await
     }
 
     // OPTIMIZED: Larger batching
@@ -146,5 +168,10 @@ impl DatabaseService {
     // NEW: Method to get SqliteManager for API service
     pub fn get_sqlite_manager(&self) -> &SqliteManager {
         &self.sqlite_manager
+    }
+
+    // NEW: Public method to update transaction status
+    pub async fn update_transaction_status(&self, transaction_id: &str, status: &str) -> Result<(), ModbusError> {
+        self.sqlite_manager.update_transaction_status(transaction_id, status).await
     }
 }
