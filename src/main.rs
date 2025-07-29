@@ -8,7 +8,7 @@ mod output;
 mod storage;
 
 use anyhow::Result;
-use clap::{Arg, Command, ArgMatches}; // Add ArgMatches import
+use clap::{Arg, Command}; // Add ArgMatches import
 use log::info;
 
 use services::DataService;
@@ -354,7 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("🔍 Loading configuration from: {}", config_file);
     
-    let mut config = if std::path::Path::new(config_file).exists() {
+    let config = if std::path::Path::new(config_file).exists() {
         info!("📁 Loading config from existing file: {}", config_file);
         match Config::from_file(config_file) {
             Ok(mut config) => {
@@ -535,7 +535,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Setup graceful shutdown
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     
     // Handle Ctrl+C
     let shutdown_tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx)));
