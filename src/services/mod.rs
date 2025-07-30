@@ -7,3 +7,4 @@ pub use data_service::DataService;
 pub use database_service::DatabaseService;
 pub use socket_server::WebSocketServer;
 pub use api_service::ApiService;
+pub use api_service::ApiServiceState;

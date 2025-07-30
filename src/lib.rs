@@ -16,6 +16,8 @@ pub mod storage;
 // Re-export commonly used types
 pub use config::Config;
 pub use services::DataService;
+use crate::services::api_service::ApiServiceState; // Added import
+
 pub use devices::{Device, DeviceData, FlowmeterDevice, FlowmeterData};
 pub use modbus::ModbusClient;
 pub use output::{DataFormatter, DataSender, ConsoleFormatter, JsonFormatter, CsvFormatter, HexFormatter};

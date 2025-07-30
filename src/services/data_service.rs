@@ -988,11 +988,12 @@ impl DataService {
                         };
 
                         // Update transaction volume and get current transaction ID
-                        let active_transaction_id = if volume_delta > 0.0 {
+                        let active_transaction_id = if volume_delta >= 0.0 {
                             service.update_transaction_volume(volume_delta).await
                         } else {
                             service.get_active_transaction_id().await
                         };
+                        
                         
                         // Store to database with transaction ID (if active and volume not reached)
                         if let Some(db_service) = &service.database_service {
@@ -1007,7 +1008,11 @@ impl DataService {
                                 }
                             }
                         }
-                        
+                        if let Some(tx_id) = &active_transaction_id {
+                            info!("🔗 Storing reading with transaction: {}", tx_id);
+                        } else {
+                            info!("📝 Storing reading without transaction");
+                        }
                         // Update device data cache
                         if let Ok(mut device_data_map) = service.device_data.lock() {
                             if let Some(uuid) = service.device_address_to_uuid.get(&addr) {

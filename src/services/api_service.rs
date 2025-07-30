@@ -99,43 +99,51 @@ pub struct ApiService {
 
 impl ApiService {
     pub fn new(config: Config, sqlite_manager: SqliteManager) -> Self {
+        let state = ApiServiceState::new(config, sqlite_manager, None);
         Self {
-            state: ApiServiceState::new(config, sqlite_manager, None),
+            state,
             server_handle: None,
         }
     }
+    
+    // NEW: Constructor that accepts pre-built state with DataService
+    pub fn new_with_state(state: ApiServiceState) -> Result<Self, ModbusError> {
+        Ok(Self {
+            state,
+            server_handle: None,
+        })
+    }
 
     pub async fn start(&mut self, port: u16) -> Result<(), ModbusError> {
-        let state = self.state.clone();
-        
         info!("🌐 Starting HTTP API server on port {}", port);
+        
+        let state_data = web::Data::new(self.state.clone());
         
         let server = HttpServer::new(move || {
             App::new()
-                .app_data(web::Data::new(state.clone()))
+                .app_data(state_data.clone())
                 .wrap(Logger::default())
                 .service(
                     web::scope("/api")
-                        .route("/new_trx_confirm", web::post().to(create_new_transaction))
                         .route("/health", web::get().to(health_check))
+                        .route("/new_trx_confirm", web::post().to(create_new_transaction))
                         .route("/overview/trx_report", web::get().to(list_transactions))
                         .route("/overview/trx_report/{id}", web::get().to(get_transaction))
                 )
         })
-        .bind(format!("0.0.0.0:{}", port))
-        .map_err(|e| ModbusError::CommunicationError(format!("Failed to bind server: {}", e)))?
-        .shutdown_timeout(5) // Add shutdown timeout
+        .bind(format!("0.0.0.0:{}", port))?
         .run();
-
-        let handle = server.handle();
-        self.server_handle = Some(handle);
-
+        
+        // Store server handle for graceful shutdown
+        self.server_handle = Some(server.handle());
+        
+        // Start the server in background
         tokio::spawn(async move {
             if let Err(e) = server.await {
-                error!("❌ HTTP server error: {}", e);
+                error!("❌ HTTP API server error: {}", e);
             }
         });
-
+        
         info!("✅ HTTP API server started successfully on port {}", port);
         Ok(())
     }
@@ -215,18 +223,22 @@ async fn create_new_transaction(
     // Store transaction in database
     match state.sqlite_manager.insert_transaction(&transaction).await {
         Ok(_) => {
-            info!("✅ Transaction created successfully: {} for vessel: {}", 
+            info!("✅ Transaction created in database: {} for vessel: {}", 
                   transaction_id, request.vessel_name);
 
-            // NEW: Start volume-based transaction tracking in DataService
+            // CRITICAL FIX: Actually start volume tracking in DataService
             if let Some(data_service) = &state.data_service {
+                info!("🔗 Starting volume tracking for transaction: {}", transaction_id);
                 data_service.start_transaction_with_volume(
                     transaction_id.clone(),
                     request.liquid_target_volume,
                     request.vessel_name.clone()
                 ).await;
-                info!("🎯 Started volume tracking for transaction: {} (target: {:.2} L)", 
+                info!("🎯 Volume tracking started for transaction: {} (target: {:.2} L)", 
                       transaction_id, request.liquid_target_volume);
+            } else {
+                warn!("⚠️ DataService not available - transaction created but volume tracking disabled");
+                warn!("💡 Transaction will be stored in database but won't trigger completion automatically");
             }
 
             Ok(HttpResponse::Ok().json(TransactionResponse {

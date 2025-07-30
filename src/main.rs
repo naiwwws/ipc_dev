@@ -11,7 +11,8 @@ use anyhow::Result;
 use clap::{Arg, Command}; // Add ArgMatches import
 use log::info;
 
-use services::DataService;
+use services::{DataService, ApiService}; // Fixed import
+use crate::services::api_service::ApiServiceState;
 use config::{Config, DynamicConfigManager};
 use ipc_dev_rust::{VERSION};
 use cli::commands::{handle_subcommands, handle_websocket_commands};
@@ -498,19 +499,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ✅ FIXED: Start API service based on TOML config, not just CLI
     if config.api_server.enabled {
-        // ✅ ENSURE: Database is available for API service OR make it optional
         if let Some(db_service) = service.get_database_service() {
             let sqlite_manager = db_service.get_sqlite_manager().clone();
-            let mut api_service = crate::services::ApiService::new(config.clone(), sqlite_manager);
+            
+            // FIXED: Create proper Arc for DataService
+            let data_service_arc = std::sync::Arc::new(service.clone());
+            
+            // Create API state with proper DataService connection
+            let api_state = ApiServiceState::new(
+                config.clone(),
+                sqlite_manager.clone(),
+                Some(data_service_arc.clone()) // Pass DataService as Arc
+            );
+            
+            // FIXED: Initialize API service with the state
+            let mut api_service = ApiService::new_with_state(api_state)?;
             api_service.start(config.api_server.port).await?;
-            info!("🌐 HTTP API server started on port {} (from TOML config)", config.api_server.port);
+            info!("🌐 HTTP API server started on port {} with DataService connection", config.api_server.port);
             api_service_handle = Some(api_service);
         } else {
-            // ✅ NEW: Allow API service without database for basic operations
             info!("⚠️  Database not available for API service");
-            info!("💡 To enable full API functionality, ensure database is configured in TOML:");
-            info!("   [output.database_output]");
-            info!("   enabled = true");
         }
     } else {
         info!("📝 API server disabled in config");
