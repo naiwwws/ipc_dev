@@ -1253,20 +1253,30 @@ impl DataService {
     // NEW: GPS control methods
     pub async fn get_current_gps_data(&self) -> Option<GpsData> {
         if let Some(gps_service) = &self.gps_service {
-            if gps_service.is_running().await {
-                let data = gps_service.get_current_data().await;
-                if data.has_valid_fix() {
-                    return Some(data);
+            // Try to get fresh GPS fix for transaction
+            match gps_service.get_current_gps_fix().await {
+                Ok(Some(data)) => Some(data),
+                Ok(None) => {
+                    // Fallback to last known data
+                    let last_data = gps_service.get_current_data().await;
+                    if last_data.has_valid_fix() {
+                        Some(last_data)
+                    } else {
+                        None
+                    }
                 }
+                Err(_) => None,
             }
+        } else {
+            None
         }
-        None
     }
     
+    // Remove the continuous GPS monitoring methods or make them no-op
     pub async fn start_gps_service(&self) -> Result<(), ModbusError> {
         if let Some(gps_service) = &self.gps_service {
             gps_service.start().await?;
-            info!("🧭 GPS service started");
+            info!("🧭 GPS service ready for on-demand requests");
             Ok(())
         } else {
             Err(ModbusError::ServiceNotAvailable("GPS service not enabled in config".to_string()))

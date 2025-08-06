@@ -108,31 +108,37 @@ impl GpsReader {
         Ok(response)
     }
 
-    pub fn read_gps_continuous<F>(&mut self, mut callback: F) -> Result<(), ModbusError>
-    where
-        F: FnMut(GpsData) -> bool,
-    {
-        let mut line_buffer = String::new();
-        let mut last_location_request = std::time::Instant::now();
+    /// Get a single GPS fix with timeout (for on-demand requests)
+    pub fn get_single_gps_fix(&mut self, timeout_seconds: u64) -> Result<Option<GpsData>, ModbusError> {
+        info!("📡 Requesting single GPS fix (timeout: {}s)...", timeout_seconds);
         
-        info!("📡 Starting continuous GPS monitoring...");
-
-        loop {
+        let start_time = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_seconds);
+        let mut line_buffer = String::new();
+        let mut best_fix: Option<GpsData> = None;
+        
+        // Send initial location request
+        if let Err(e) = self.port.write_all(b"AT+QGPSLOC=0\r\n") {
+            warn!("⚠️ Failed to send initial GPS location request: {}", e);
+        } else {
+            self.port.flush().ok();
+        }
+        
+        while start_time.elapsed() < timeout {
             // Request location every 5 seconds
-            if last_location_request.elapsed() > Duration::from_secs(5) {
+            if start_time.elapsed().as_secs() % 5 == 0 {
                 if let Err(e) = self.port.write_all(b"AT+QGPSLOC=0\r\n") {
-                    warn!("⚠️ Failed to send GPS location request: {}", e);
+                    debug!("⚠️ Failed to send GPS location request: {}", e);
                 } else {
                     self.port.flush().ok();
                 }
-                last_location_request = std::time::Instant::now();
             }
             
             // Read data from port
             let mut buffer = [0u8; 1024];
             match self.port.read(&mut buffer) {
                 Ok(0) => {
-                    std::thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(100));
                     continue;
                 }
                 Ok(n) => {
@@ -148,69 +154,60 @@ impl GpsReader {
                             continue;
                         }
                         
-                        debug!("📥 Received GPS data: {}", line_owned);
+                        debug!("📥 GPS response: {}", line_owned);
                         
                         // Handle QGPSLOC response
                         if line_owned.starts_with("+QGPSLOC:") {
                             if let Some(gps_data) = Self::parse_qgpsloc_static(&line_owned) {
-                                debug!("✅ Parsed QGPSLOC data: {:?}", gps_data);
-                                if !callback(gps_data) {
-                                    return Ok(());
+                                debug!("✅ Parsed GPS data: {:?}", gps_data);
+                                
+                                if gps_data.has_valid_fix() {
+                                    info!("🎯 GPS fix acquired in {:.2}s: {:.6}°, {:.6}°", 
+                                          start_time.elapsed().as_secs_f32(),
+                                          gps_data.latitude.unwrap_or(0.0),
+                                          gps_data.longitude.unwrap_or(0.0));
+                                    return Ok(Some(gps_data));
+                                } else {
+                                    // Store as best attempt even without full fix
+                                    best_fix = Some(gps_data);
                                 }
                             }
                         }
                         // Handle standard NMEA sentences
                         else if line_owned.starts_with('$') {
-                            match self.nmea_parser.parse(&line_owned) {
-                                Ok(sentence_type) => {
-                                    debug!("✅ Parsed NMEA sentence: {:?}", sentence_type);
-                                    
-                                    // Start with current Unix timestamp
-                                    let mut gps_data = GpsData::new(); // Uses current Unix timestamp
-                                    
-                                    if let Some(lat) = self.nmea_parser.latitude {
-                                        gps_data.latitude = Some(lat);
-                                    }
-                                    if let Some(lon) = self.nmea_parser.longitude {
-                                        gps_data.longitude = Some(lon);
-                                    }
-                                    if let Some(alt) = self.nmea_parser.altitude {
-                                        gps_data.altitude = Some(alt);
-                                    }
-                                    if let Some(speed) = self.nmea_parser.speed_over_ground {
-                                        gps_data.speed = Some(speed);
-                                    }
-                                    if let Some(course) = self.nmea_parser.true_course {
-                                        gps_data.course = Some(course);
-                                    }
-                                    if let Some(sats) = self.nmea_parser.num_of_fix_satellites {
-                                        gps_data.satellites = Some(sats);
-                                    }
-                                    if let Some(fix_type) = self.nmea_parser.fix_type {
-                                        gps_data.fix_type = Some(format!("{:?}", fix_type));
-                                    }
-                                    
-                                    // Convert NMEA time to Unix timestamp if available
-                                    if let Some(time) = self.nmea_parser.fix_time {
-                                        if let Some(date) = self.nmea_parser.fix_date {
-                                            let datetime = date.and_time(time);
-                                            gps_data.timestamp = Some(datetime.and_utc().timestamp());
-                                        }
-                                    }
-                                    // If no NMEA time, keep the current timestamp set in new()
-
-                                    if gps_data.latitude.is_some() && gps_data.longitude.is_some() {
-                                        debug!("📍 GPS Fix acquired: lat={:.6}, lon={:.6}, timestamp={}", 
-                                               gps_data.latitude.unwrap(), 
-                                               gps_data.longitude.unwrap(),
-                                               gps_data.timestamp.unwrap_or(0));
-                                        if !callback(gps_data) {
-                                            return Ok(());
-                                        }
-                                    }
+                            if let Ok(_) = self.nmea_parser.parse(&line_owned) {
+                                let mut gps_data = GpsData::new();
+                                
+                                if let Some(lat) = self.nmea_parser.latitude {
+                                    gps_data.latitude = Some(lat);
                                 }
-                                Err(e) => {
-                                    debug!("⚠️ Failed to parse NMEA sentence: {} - Error: {:?}", line_owned, e);
+                                if let Some(lon) = self.nmea_parser.longitude {
+                                    gps_data.longitude = Some(lon);
+                                }
+                                if let Some(alt) = self.nmea_parser.altitude {
+                                    gps_data.altitude = Some(alt);
+                                }
+                                if let Some(speed) = self.nmea_parser.speed_over_ground {
+                                    gps_data.speed = Some(speed);
+                                }
+                                if let Some(course) = self.nmea_parser.true_course {
+                                    gps_data.course = Some(course);
+                                }
+                                if let Some(sats) = self.nmea_parser.num_of_fix_satellites {
+                                    gps_data.satellites = Some(sats);
+                                }
+                                if let Some(fix_type) = self.nmea_parser.fix_type {
+                                    gps_data.fix_type = Some(format!("{:?}", fix_type));
+                                }
+                                
+                                if gps_data.has_valid_fix() {
+                                    info!("🎯 NMEA GPS fix acquired in {:.2}s: {:.6}°, {:.6}°", 
+                                          start_time.elapsed().as_secs_f32(),
+                                          gps_data.latitude.unwrap_or(0.0),
+                                          gps_data.longitude.unwrap_or(0.0));
+                                    return Ok(Some(gps_data));
+                                } else {
+                                    best_fix = Some(gps_data);
                                 }
                             }
                         }
@@ -225,6 +222,9 @@ impl GpsReader {
                 }
             }
         }
+        
+        warn!("⏰ GPS fix timeout after {}s", timeout_seconds);
+        Ok(best_fix) // Return best attempt or None
     }
 
     fn parse_qgpsloc_static(line: &str) -> Option<GpsData> {
