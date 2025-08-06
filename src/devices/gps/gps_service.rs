@@ -53,18 +53,45 @@ impl GpsService {
                             continue;
                         }
                         
-                        // Start continuous monitoring
-                        let result = gps_reader.read_gps_continuous(|gps_data| {
-                            // Update current data
-                            tokio::runtime::Handle::current().block_on(async {
-                                let mut data = current_data.write().await;
-                                *data = gps_data;
-                                *is_running.read().await
-                            })
+                        let current_data_clone = current_data.clone();
+                        let is_running_clone = is_running.clone();
+                        
+                        let gps_task = tokio::task::spawn_blocking(move || {
+                            let result = gps_reader.read_gps_continuous(move |gps_data| {
+                                // Use try_lock to avoid blocking
+                                if let Ok(mut data) = current_data_clone.try_write() {
+                                    *data = gps_data.clone();
+                                    
+                                    // Log GPS updates
+                                    if gps_data.has_valid_fix() {
+                                        info!("📍 GPS Fix: {:.6}°, {:.6}° | {} sats", 
+                                              gps_data.latitude.unwrap_or(0.0),
+                                              gps_data.longitude.unwrap_or(0.0),
+                                              gps_data.satellites.unwrap_or(0));
+                                    }
+                                }
+                                
+                                // Check if we should continue (non-blocking)
+                                if let Ok(running) = is_running_clone.try_read() {
+                                    *running
+                                } else {
+                                    true // Continue if we can't check
+                                }
+                            });
+                            
+                            if let Err(e) = result {
+                                error!("❌ GPS monitoring error: {}", e);
+                            }
                         });
                         
-                        if let Err(e) = result {
-                            error!("❌ GPS monitoring error: {}", e);
+                        // Wait for the GPS task or stop signal
+                        tokio::select! {
+                            _ = gps_task => {
+                                info!("🧭 GPS monitoring task completed");
+                            }
+                            _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                                info!("🧭 GPS monitoring cycle timeout, restarting...");
+                            }
                         }
                     },
                     Err(e) => {
