@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use log::{info, warn, error};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use std::collections::HashMap;
 use std::path::Path;
 use tokio::sync::{Mutex, broadcast};
@@ -134,10 +133,6 @@ impl DynamicConfigManager {
     //  ADD: Method to get current config for saving
     pub async fn get_current_config(&self) -> Config {
         self.config.lock().await.clone()
-    }
-
-    pub fn subscribe_to_changes(&self) -> broadcast::Receiver<ConfigurationResponse> {
-        self.change_sender.subscribe()
     }
 
     //  Update the broadcast to handle potential channel closure gracefully
@@ -580,7 +575,6 @@ impl DynamicConfigManager {
                     return Err(ModbusError::InvalidData(format!("Device with address {} already exists", address)));
                 }
 
-                let device_id = command.parameters.get("device_id").cloned().unwrap_or_else(|| format!("DEV_{:03}", address));
                 let device_type = command.parameters.get("device_type").cloned().unwrap_or_else(|| "flowmeter".to_string());
                 let name = command.parameters.get("name").cloned().unwrap_or_else(|| format!("Device {}", address));
                 let location = command.parameters.get("location").cloned().unwrap_or_else(|| "Unknown".to_string());
@@ -693,9 +687,4 @@ impl DynamicConfigManager {
         Ok(())
     }
 
-    pub async fn get_command_history(&self) -> Vec<ConfigurationCommand> {
-        match self.command_history.lock().await {
-            history => history.clone(),
-        }
-    }
 }

@@ -1,11 +1,8 @@
-use chrono::{DateTime, Utc};
-use log::{info, error, warn, debug};
-use sqlx::{Pool, Sqlite, SqlitePool, Row};
+use chrono::{Utc};
+use log::{info};
+use sqlx::{SqlitePool, Row};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 
 use crate::config::settings::SqliteConfig;
 use crate::storage::models::{FlowmeterReading, FlowmeterStats, Transaction};
@@ -15,7 +12,6 @@ use crate::utils::error::ModbusError;
 pub struct SqliteManager {
     pool: SqlitePool,
     config: SqliteConfig,
-    connection_count: Arc<RwLock<usize>>,
 }
 
 impl SqliteManager {
@@ -26,15 +22,6 @@ impl SqliteManager {
                 ModbusError::CommunicationError(format!("Failed to create database directory: {}", e))
             })?;
         }
-
-        // Build connection string with optimizations
-        let connection_string = format!(
-            "sqlite:{}?cache=shared&_busy_timeout={}&_journal_mode={}",
-            config.database_path,
-            config.busy_timeout_ms,
-            if config.enable_wal { "WAL" } else { "DELETE" }
-        );
-
         info!("🗄️  Initializing SQLite database: {}", config.database_path);
 
         // Create connection pool with optimized settings
@@ -74,7 +61,6 @@ impl SqliteManager {
         let manager = Self {
             pool,
             config,
-            connection_count: Arc::new(RwLock::new(0)),
         };
 
         // Initialize database schema

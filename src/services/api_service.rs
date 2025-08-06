@@ -272,7 +272,7 @@ async fn create_new_transaction(
                     "speed": transaction.gps_speed,
                     "course": transaction.gps_course,
                     "satellites": transaction.gps_satellites,
-                    "unix_timestamp": transaction.gps_timestamp
+                    "gps_ts": transaction.gps_timestamp
                 });
             }
 

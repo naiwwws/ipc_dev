@@ -1,9 +1,9 @@
 use clap::ArgMatches;
-use log::{info, warn, error};
+use log::{info};
 use anyhow::{Result, anyhow};
 
 use crate::services::DataService;
-use crate::output::{JsonFormatter, CsvFormatter, FileSender, MqttSender};
+use crate::output::{JsonFormatter, CsvFormatter, FileSender};
 
 pub async fn handle_subcommands(
     matches: &ArgMatches,
@@ -352,28 +352,7 @@ pub async fn handle_gps_commands(
         }
 
         println!("⏳ Waiting for GPS data (10 seconds)...");
-        
-        // Wait and check for data periodically
-        for i in 1..=10 {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            
-            if let Some(gps_data) = service.get_current_gps_data().await {
-                if gps_data.has_valid_fix() {
-                    println!("✅ GPS test successful!");
-                    println!("📍 Position: {:.6}°, {:.6}°", 
-                             gps_data.latitude.unwrap_or(0.0),
-                             gps_data.longitude.unwrap_or(0.0));
-                    if let Some(sats) = gps_data.satellites {
-                        println!("🛰️  Satellites: {}", sats);
-                    }
-                    return Ok(true);
-                }
-            }
-            
-            print!(".");
-            use std::io::{self, Write};
-            io::stdout().flush().unwrap();
-        }
+    
         
         println!("\n⚠️  GPS test completed but no valid fix acquired");
         println!("💡 This could mean:");
