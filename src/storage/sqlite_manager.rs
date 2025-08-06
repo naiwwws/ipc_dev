@@ -222,7 +222,7 @@ impl SqliteManager {
                 customer_vessel_name, customer_pic_name, customer_location_name,
                 supplier_name, created_at, status,
                 gps_latitude, gps_longitude, gps_altitude, gps_speed, gps_course, gps_satellites, gps_timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#)
         .bind(&transaction.transaction_id)
         .bind(&transaction.flow_type)
@@ -246,7 +246,6 @@ impl SqliteManager {
         .bind(&transaction.supplier_name)
         .bind(transaction.created_at)
         .bind(&transaction.status)
-        // NEW: GPS bindings
         .bind(transaction.gps_latitude)
         .bind(transaction.gps_longitude)
         .bind(transaction.gps_altitude)
