@@ -9,8 +9,6 @@ use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 use futures_util::{SinkExt, StreamExt, stream::{SplitStream, SplitSink}}; // ADD: SplitSink import
 
 use crate::config::Config;
-use crate::devices::traits::DeviceData;
-// REMOVE: use crate::devices::flowmeter::FlowmeterData; // This import might be causing issues
 use crate::utils::error::ModbusError;
 use crate::storage::models::{FlowmeterReading, FlowmeterStats};
 
@@ -411,82 +409,6 @@ impl WebSocketServer {
         }
     }
 
-    // MODIFIED: Update send_device_data to only send to streaming clients
-    pub async fn send_device_data(&self, device_data: &dyn DeviceData) -> Result<(), ModbusError> {
-        // Check if this is flowmeter data
-        if device_data.device_type() != "flowmeter" {
-            return Ok(()); // Only handle flowmeter data
-        }
-
-        let message = serde_json::json!({
-            "endpoint": "/flowmeter/read",
-            "type": "flowmeter_data",
-            "timestamp": device_data.unix_ts(),
-            "device_address": device_data.device_address(),
-            "data": device_data.get_parameters_as_floats()
-        });
-
-        // CHANGED: Only send to clients that are actively streaming
-        self.broadcast_to_streaming_clients(&message, device_data.device_address()).await?;
-        Ok(())
-    }
-
-    // NEW: Broadcast only to clients that are streaming
-    async fn broadcast_to_streaming_clients(&self, message: &Value, device_address: u8) -> Result<(), ModbusError> {
-        let message_text = serde_json::to_string(message).map_err(|e| {
-            ModbusError::InvalidData(format!("Failed to serialize message: {}", e))
-        })?;
-
-        let mut clients = self.clients.write().await;
-        let mut client_stats = self.client_stats.write().await;
-        let mut clients_to_remove = Vec::new();
-
-        for (client_id, ws_stream) in clients.iter_mut() {
-            // Check if client is streaming and device matches (or streaming all devices)
-            if let Some(stats) = client_stats.get(client_id) {
-                if !stats.is_streaming {
-                    continue; // Skip clients not streaming
-                }
-                
-                // If client has a specific device filter, check if it matches
-                if let Some(client_device) = stats.streaming_device {
-                    if client_device != device_address {
-                        continue; // Skip if device doesn't match
-                    }
-                }
-            } else {
-                continue; // Skip clients without stats
-            }
-
-            let ws_message = Message::Text(message_text.clone());
-            match timeout(Duration::from_secs(5), ws_stream.send(ws_message)).await {
-                Ok(Ok(())) => {
-                    if let Some(stats) = client_stats.get_mut(client_id) {
-                        stats.bytes_sent += message_text.len() as u64;
-                        stats.messages_sent += 1;
-                    }
-                    debug!("📡 Streamed flowmeter data to client {}", client_id);
-                }
-                Ok(Err(e)) => {
-                    warn!("Failed to send streaming data to client {}: {}", client_id, e);
-                    clients_to_remove.push(client_id.clone());
-                }
-                Err(_) => {
-                    warn!("Timeout sending streaming data to client {}", client_id);
-                    clients_to_remove.push(client_id.clone());
-                }
-            }
-        }
-
-        // Remove disconnected clients
-        for client_id in clients_to_remove {
-            clients.remove(&client_id);
-            client_stats.remove(&client_id);
-            info!("🔌 Streaming client {} disconnected", client_id);
-        }
-
-        Ok(())
-    }
 
     /// Send flowmeter readings from database
     pub async fn send_flowmeter_readings(&self, readings: Vec<FlowmeterReading>) -> Result<(), ModbusError> {
@@ -523,25 +445,6 @@ impl WebSocketServer {
         Ok(())
     }
 
-    /// Send system status
-    pub async fn send_system_status(&self, device_count: usize, uptime_seconds: u64) -> Result<(), ModbusError> {
-        let message = serde_json::json!({
-            "endpoint": "/system/status",
-            "type": "system_status",
-            "timestamp": chrono::Utc::now().timestamp(),
-            "data": {
-                "service_running": true,
-                "devices_configured": device_count,
-                "websocket_enabled": true,
-                "connected_clients": self.get_client_count().await,
-                "uptime_seconds": uptime_seconds,
-                "websocket_port": self.port
-            }
-        });
-
-        self.broadcast_to_endpoint("/system/status", &message).await?;
-        Ok(())
-    }
 
     async fn handle_flowmeter_recent_endpoint(&self, client_id: &str, method: &str, params: &Value, request_id: &str) {
         if method != "GET" {
@@ -662,10 +565,6 @@ impl WebSocketServer {
         self.send_to_client(client_id, &response).await.ok();
     }
 
-    // FIX: Make send_to_client public and add an alias
-    pub async fn send_response_to_client(&self, client_id: &str, message: &Value) -> Result<(), ModbusError> {
-        self.send_to_client(client_id, message).await
-    }
 
     pub async fn send_to_client(&self, client_id: &str, message: &Value) -> Result<(), ModbusError> {
         let message_text = serde_json::to_string(message).map_err(|e| {
@@ -702,10 +601,6 @@ impl WebSocketServer {
 
     // ADD: Missing broadcast_to_endpoint method
     pub async fn broadcast_to_endpoint(&self, endpoint: &str, message: &Value) -> Result<(), ModbusError> {
-        let message_text = serde_json::to_string(message).map_err(|e| {
-            ModbusError::InvalidData(format!("Failed to serialize message: {}", e))
-        })?;
-
         let mut clients = self.clients.write().await;
         let mut client_stats = self.client_stats.write().await;
         let mut clients_to_remove = Vec::new();
@@ -761,45 +656,6 @@ impl WebSocketServer {
     }
 
     // ADD: Broadcast to all clients (helper method)
-    pub async fn broadcast_to_all(&self, message: &Value) -> Result<(), ModbusError> {
-        let message_text = serde_json::to_string(message).map_err(|e| {
-            ModbusError::InvalidData(format!("Failed to serialize message: {}", e))
-        })?;
-
-        let mut clients = self.clients.write().await;
-        let mut client_stats = self.client_stats.write().await;
-        let mut clients_to_remove = Vec::new();
-
-        for (client_id, ws_stream) in clients.iter_mut() {
-            let ws_message = Message::Text(message_text.clone());
-            match timeout(Duration::from_secs(5), ws_stream.send(ws_message)).await {
-                Ok(Ok(())) => {
-                    if let Some(stats) = client_stats.get_mut(client_id) {
-                        stats.messages_sent += 1;
-                        stats.bytes_sent += message_text.len() as u64;
-                    }
-                    debug!("📤 Broadcast message to client {}", client_id);
-                }
-                Ok(Err(e)) => {
-                    warn!("❌ Failed to broadcast to client {}: {}", client_id, e);
-                    clients_to_remove.push(client_id.clone());
-                }
-                Err(_) => {
-                    warn!("⏱️ Timeout broadcasting to client {}", client_id);
-                    clients_to_remove.push(client_id.clone());
-                }
-            }
-        }
-
-        // Remove disconnected clients
-        for client_id in clients_to_remove {
-            clients.remove(&client_id);
-            client_stats.remove(&client_id);
-            info!("🔌 Removed disconnected client: {}", client_id);
-        }
-
-        Ok(())
-    }
 
     // ADD: Send welcome message (updated to include new endpoint)
     pub async fn send_welcome_message(&self, client_id: &str) -> Result<(), ModbusError> {

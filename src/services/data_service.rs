@@ -15,6 +15,7 @@ use crate::services::DatabaseService;
 use crate::services::socket_server::WebSocketServer;
 use crate::utils::error::ModbusError;
 use tokio::sync::Mutex as TokioMutex;
+use crate::devices::gps::{GpsService, GpsData};
 
 pub struct DataService {
     config: Config,
@@ -31,6 +32,9 @@ pub struct DataService {
     
     // NEW: Transaction tracking with volume monitoring
     active_transaction: Arc<TokioMutex<Option<ActiveTransaction>>>,
+    
+    // NEW: GPS service
+    gps_service: Option<GpsService>,
 }
 
 // NEW: Structure to track active transaction with volume
@@ -71,6 +75,7 @@ impl Clone for DataService {
             streaming_clients: self.streaming_clients.clone(),
             polling_handle: self.polling_handle.clone(),
             active_transaction: self.active_transaction.clone(), // NEW field
+            gps_service: self.gps_service.clone(), // NEW field
         }
     }
 }
@@ -150,6 +155,29 @@ impl DataService {
             None
         };
 
+        // NEW: Initialize GPS service if enabled
+        let gps_service = if config.gps.enabled {
+            info!("🧭 Initializing GPS service on port {}", config.gps.port);
+            let gps_service = GpsService::new(
+                config.gps.port.clone(),
+                config.gps.baud_rate,
+            );
+            
+            // Auto-start if configured
+            if config.gps.auto_start {
+                if let Err(e) = gps_service.start().await {
+                    warn!("⚠️ Failed to auto-start GPS service: {}", e);
+                } else {
+                    info!("🧭 GPS service auto-started");
+                }
+            }
+            
+            Some(gps_service)
+        } else {
+            info!("📝 GPS service disabled in config");
+            None
+        };
+
         // Create the DataService instance with new fields
         let data_service = Self {
             config,
@@ -164,6 +192,7 @@ impl DataService {
             streaming_clients: Arc::new(TokioMutex::new(0)),
             polling_handle: Arc::new(TokioMutex::new(None)),
             active_transaction: Arc::new(TokioMutex::new(None)), // NEW field
+            gps_service,
         };
 
         // Start WebSocket request handler if WebSocket is enabled
@@ -618,7 +647,7 @@ impl DataService {
                     // Store in memory for immediate access
                     {
                         let mut device_data = self.device_data.lock().unwrap();
-                        device_data.insert(device_uuid, data.as_ref().clone_box());
+                        device_data.insert(device_uuid, data.clone_box());
                     }
                     all_data.push(data);
                 }
@@ -1016,7 +1045,7 @@ impl DataService {
                         // Update device data cache
                         if let Ok(mut device_data_map) = service.device_data.lock() {
                             if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
-                                device_data_map.insert(uuid.clone(), data.clone_box());
+                                device_data_map.insert(uuid.clone(), data.clone_box()); // FIXED: Use clone_box()
                             }
                         }
                         
@@ -1218,6 +1247,47 @@ impl DataService {
             }
         } else {
             None
+        }
+    }
+    
+    // NEW: GPS control methods
+    pub async fn get_current_gps_data(&self) -> Option<GpsData> {
+        if let Some(gps_service) = &self.gps_service {
+            if gps_service.is_running().await {
+                let data = gps_service.get_current_data().await;
+                if data.has_valid_fix() {
+                    return Some(data);
+                }
+            }
+        }
+        None
+    }
+    
+    pub async fn start_gps_service(&self) -> Result<(), ModbusError> {
+        if let Some(gps_service) = &self.gps_service {
+            gps_service.start().await?;
+            info!("🧭 GPS service started");
+            Ok(())
+        } else {
+            Err(ModbusError::ServiceNotAvailable("GPS service not enabled in config".to_string()))
+        }
+    }
+    
+    pub async fn stop_gps_service(&self) -> Result<(), ModbusError> {
+        if let Some(gps_service) = &self.gps_service {
+            gps_service.stop().await?;
+            info!("🧭 GPS service stopped");
+            Ok(())
+        } else {
+            Err(ModbusError::ServiceNotAvailable("GPS service not enabled in config".to_string()))
+        }
+    }
+    
+    pub async fn get_gps_status(&self) -> Result<String, ModbusError> {
+        if let Some(gps_service) = &self.gps_service {
+            Ok(gps_service.get_status().await)
+        } else {
+            Ok("GPS not available".to_string())
         }
     }
 }

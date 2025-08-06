@@ -84,7 +84,7 @@ impl SqliteManager {
         Ok(manager)
     }
 
-    // Update the schema to include transactions table
+    // Update schema creation with Unix timestamp comments
     async fn initialize_schema(&self) -> Result<(), ModbusError> {
         info!("🔧 Initializing database schema...");
 
@@ -111,7 +111,7 @@ impl SqliteManager {
         .execute(&self.pool)
         .await?;
 
-        // NEW: Transactions table for API service
+        // UPDATED: Transactions table with GPS fields (Unix timestamps)
         sqlx::query(r#"
             CREATE TABLE IF NOT EXISTS transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,17 +135,57 @@ impl SqliteManager {
                 customer_pic_name TEXT,
                 customer_location_name TEXT,
                 supplier_name TEXT,
-                created_at INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'confirmed'
+                created_at INTEGER NOT NULL,  -- Unix timestamp
+                status TEXT NOT NULL DEFAULT 'confirmed',
+                
+                -- GPS location data (all timestamps as Unix time)
+                gps_latitude REAL,
+                gps_longitude REAL,
+                gps_altitude REAL,
+                gps_speed REAL,
+                gps_course REAL,
+                gps_satellites INTEGER,
+                gps_timestamp INTEGER  -- Unix timestamp when GPS fix was acquired
             )
         "#)
         .execute(&self.pool)
         .await?;
 
-        // MINIMAL: Only essential indexes
+        // Run migration for existing databases
+        self.migrate_schema().await?;
         self.create_minimal_indexes().await?;
-
         info!("✅ Database schema initialized");
+        Ok(())
+    }
+
+    // Add migration for GPS columns
+    async fn migrate_schema(&self) -> Result<(), ModbusError> {
+        info!("🔄 Checking for database schema migrations...");
+        
+        // Check if GPS columns exist
+        let gps_column_exists = sqlx::query(r#"PRAGMA table_info(transactions)"#)
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .any(|row| {
+                let column_name: String = row.get("name");
+                column_name == "gps_latitude"
+            });
+        
+        if !gps_column_exists {
+            info!("🔧 Adding GPS location columns to transactions table...");
+            
+            // Add GPS columns
+            for column in ["gps_latitude REAL", "gps_longitude REAL", "gps_altitude REAL", 
+                          "gps_speed REAL", "gps_course REAL", "gps_satellites INTEGER", "gps_timestamp INTEGER"] {
+                sqlx::query(&format!("ALTER TABLE transactions ADD COLUMN {}", column))
+                    .execute(&self.pool)
+                    .await?;
+            }
+            
+            info!("✅ Successfully added GPS location columns");
+        }
+        
         Ok(())
     }
 
@@ -180,8 +220,9 @@ impl SqliteManager {
                 liquid_residual_carbon_min, liquid_residual_carbon_max,
                 operator_full_name, operator_email, operator_phone_number,
                 customer_vessel_name, customer_pic_name, customer_location_name,
-                supplier_name, created_at, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                supplier_name, created_at, status,
+                gps_latitude, gps_longitude, gps_altitude, gps_speed, gps_course, gps_satellites, gps_timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#)
         .bind(&transaction.transaction_id)
         .bind(&transaction.flow_type)
@@ -205,6 +246,14 @@ impl SqliteManager {
         .bind(&transaction.supplier_name)
         .bind(transaction.created_at)
         .bind(&transaction.status)
+        // NEW: GPS bindings
+        .bind(transaction.gps_latitude)
+        .bind(transaction.gps_longitude)
+        .bind(transaction.gps_altitude)
+        .bind(transaction.gps_speed)
+        .bind(transaction.gps_course)
+        .bind(transaction.gps_satellites)
+        .bind(transaction.gps_timestamp)
         .execute(&self.pool)
         .await?;
 

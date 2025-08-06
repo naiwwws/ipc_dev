@@ -101,7 +101,16 @@ async fn handle_show_command(
     println!("   🔄 Polling Interval: {} seconds", config.update_interval_seconds);
     println!("   🔁 Max Retries: {}", config.max_retries);
     println!("   ⏳ Retry Delay: {} ms", config.retry_delay_ms);
-    
+
+    // NEW: GPS Configuration Information
+    println!("\n🧭 GPS Configuration:");
+    println!("═══════════════════════════════════════");
+    let gps_status = if config.gps.enabled { "✅ ENABLED" } else { "❌ DISABLED" };
+    println!("   📡 Status: {}", gps_status);
+    println!("   🔌 Port: {}", config.gps.port);
+    println!("   📶 Baud Rate: {}", config.gps.baud_rate);
+    println!("   🚀 Auto Start: {}", if config.gps.auto_start { "Yes" } else { "No" });
+
     println!("\n📡 Devices ({}):", config.devices.len());
     println!("═══════════════════════════════════════════════════════════");
     for device in &config.devices {
@@ -150,7 +159,6 @@ async fn handle_show_command(
     println!("   🏠 Host: {}", config.api_server.host);
     println!("   🔒 CORS: {}", if config.api_server.cors_enabled { "Enabled" } else { "Disabled" });
     println!("   🌍 Origins: {}", config.api_server.cors_origins.join(", "));
-    
     Ok(true)
 }
 
@@ -297,6 +305,8 @@ async fn handle_set_command(
         ConfigTarget::Site
     } else if target == "system" {
         ConfigTarget::System
+    } else if target == "gps" {
+        ConfigTarget::Gps
     } else if target.starts_with("device:") {
         let address_str = target.strip_prefix("device:").unwrap();
         let address = address_str.parse::<u8>()
@@ -317,6 +327,7 @@ async fn handle_set_command(
         ConfigTarget::Monitoring => true,
         ConfigTarget::Site => true,
         ConfigTarget::System => true,
+        ConfigTarget::Gps => true,
         ConfigTarget::Device { .. } => true,
         ConfigTarget::Output { .. } => true,
         ConfigTarget::SocketServer => true,  // ✅ ADD: Make socket server changes immediate

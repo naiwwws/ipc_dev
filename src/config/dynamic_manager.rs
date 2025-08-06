@@ -56,6 +56,7 @@ pub enum ConfigTarget {
     Monitoring,
     Site,
     System,
+    Gps,
     Device { address: u8 },
     Output { output_type: String },
     SocketServer,  // ✅ ADD: Socket server target
@@ -71,6 +72,7 @@ impl fmt::Display for ConfigTarget {
             ConfigTarget::Output { output_type } => write!(f, "Output[{}]", output_type),
             ConfigTarget::Site => write!(f, "Site"),
             ConfigTarget::System => write!(f, "System"),
+            ConfigTarget::Gps => write!(f, "GPS"),
             ConfigTarget::SocketServer => write!(f, "SocketServer"),
         }
     }
@@ -346,6 +348,75 @@ impl DynamicConfigManager {
                     }
                 }
             }
+            ConfigTarget::Gps => {
+                for (key, value) in &command.parameters {
+                    match key.as_str() {
+                        "enabled" => {
+                            let enabled = value.parse::<bool>().map_err(|_| 
+                                ModbusError::InvalidData("Invalid boolean value for GPS enabled".to_string()))?;
+                            
+                            let old_value = config.gps.enabled.to_string();
+                            config.gps.enabled = enabled;
+                            
+                            let restart_required = if enabled != config.gps.enabled { false } else { false };
+                            
+                            return Ok((true, 
+                                     format!("GPS enabled changed from {} to {}", old_value, enabled),
+                                     Some(old_value),
+                                     Some(value.clone()),
+                                     restart_required));
+                        },
+                        "port" => {
+                            let old_value = config.gps.port.clone();
+                            config.gps.port = value.clone();
+                            
+                            return Ok((true, 
+                                     format!("GPS port changed from '{}' to '{}'", old_value, value),
+                                     Some(old_value),
+                                     Some(value.clone()),
+                                     true)); // Port change requires restart
+                        },
+                        "baud_rate" => {
+                            let baud_rate = value.parse::<u32>().map_err(|_| 
+                                ModbusError::InvalidData("Invalid baud rate for GPS".to_string()))?;
+                            
+                            // Validate common GPS baud rates
+                            if ![4800, 9600, 19200, 38400, 57600, 115200].contains(&baud_rate) {
+                                return Ok((false, 
+                                         format!("Invalid GPS baud rate: {}. Supported: 4800, 9600, 19200, 38400, 57600, 115200", baud_rate),
+                                         None, None, false));
+                            }
+                            
+                            let old_value = config.gps.baud_rate.to_string();
+                            config.gps.baud_rate = baud_rate;
+                            
+                            return Ok((true, 
+                                     format!("GPS baud rate changed from {} to {}", old_value, baud_rate),
+                                     Some(old_value),
+                                     Some(value.clone()),
+                                     true)); // Baud rate change requires restart
+                        },
+                        "auto_start" => {
+                            let auto_start = value.parse::<bool>().map_err(|_| 
+                                ModbusError::InvalidData("Invalid boolean value for GPS auto_start".to_string()))?;
+                            
+                            let old_value = config.gps.auto_start.to_string();
+                            config.gps.auto_start = auto_start;
+                            
+                            return Ok((true, 
+                                     format!("GPS auto start changed from {} to {}", old_value, auto_start),
+                                     Some(old_value),
+                                     Some(value.clone()),
+                                     false)); // Auto start change doesn't require restart
+                        },
+                        _ => {
+                            return Ok((false, 
+                                     format!("Unknown GPS parameter: {}. Available: enabled, port, baud_rate, auto_start", key),
+                                     None, None, false));
+                        }
+                    }
+                }
+            },
             ConfigTarget::Device { address } => {
                 if let Some(device) = config.devices.iter_mut().find(|d| d.address == *address) {
                     for (key, value) in &command.parameters {

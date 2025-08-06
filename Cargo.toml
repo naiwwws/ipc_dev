@@ -53,6 +53,7 @@ tokio = { version = "1.36.0", features = [
 
 # Serial communication
 serialport = { path = "./serialport-rs" }
+nmea = "0.7.0"
 
 # Essential utilities - minimal features
 bytes = "1.0"

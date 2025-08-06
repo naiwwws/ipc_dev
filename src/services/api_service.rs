@@ -181,6 +181,24 @@ async fn create_new_transaction(
 ) -> ActixResult<HttpResponse> {
     info!("📝 Received new transaction request for vessel: {}", request.vessel_name);
     
+    // Get GPS data if available
+    let gps_data = if let Some(data_service) = &state.data_service {
+        data_service.get_current_gps_data().await
+    } else {
+        None
+    };
+    
+    // Log GPS data with Unix timestamp
+    if let Some(gps) = &gps_data {
+        info!("🧭 Transaction location: {:.6}°, {:.6}°, Satellites: {}, Unix Timestamp: {}", 
+              gps.latitude.unwrap_or(0.0), 
+              gps.longitude.unwrap_or(0.0),
+              gps.satellites.unwrap_or(0),
+              gps.timestamp.unwrap_or(0));
+    } else {
+        info!("📝 No GPS data available for transaction");
+    }
+    
     // Validate request
     if let Err(validation_error) = validate_transaction_request(&request) {
         warn!("❌ Transaction validation failed: {}", validation_error);
@@ -192,10 +210,9 @@ async fn create_new_transaction(
         }));
     }
 
-    // Generate transaction ID
     let transaction_id = Uuid::new_v4().to_string();
     
-    // Create transaction for database
+    // Create transaction with GPS data
     let transaction = Transaction::new(
         transaction_id.clone(),
         format!("{:?}", request.flow_type).to_lowercase(),
@@ -218,38 +235,48 @@ async fn create_new_transaction(
         request.customer_location_name.clone(),
         request.supplier_name.clone(),
         "confirmed".to_string(),
+        gps_data, // NEW: Include GPS data
     );
 
     // Store transaction in database
     match state.sqlite_manager.insert_transaction(&transaction).await {
         Ok(_) => {
-            info!("✅ Transaction created in database: {} for vessel: {}", 
+            info!("✅ Transaction created with GPS data: {} for vessel: {}", 
                   transaction_id, request.vessel_name);
 
-            // CRITICAL FIX: Actually start volume tracking in DataService
+            // Start volume tracking in DataService
             if let Some(data_service) = &state.data_service {
-                info!("🔗 Starting volume tracking for transaction: {}", transaction_id);
                 data_service.start_transaction_with_volume(
                     transaction_id.clone(),
                     request.liquid_target_volume,
                     request.vessel_name.clone()
                 ).await;
-                info!("🎯 Volume tracking started for transaction: {} (target: {:.2} L)", 
-                      transaction_id, request.liquid_target_volume);
-            } else {
-                warn!("⚠️ DataService not available - transaction created but volume tracking disabled");
-                warn!("💡 Transaction will be stored in database but won't trigger completion automatically");
             }
 
-            Ok(HttpResponse::Ok().json(TransactionResponse {
-                success: true,
-                transaction_id,
-                message: format!("Transaction confirmed for vessel: {} (target volume: {:.2} L)", 
-                               request.vessel_name, request.liquid_target_volume),
-                timestamp: Utc::now(),
-                flow_type: request.flow_type.clone(),
-                vessel_id: request.vessel_id.clone(),
-            }))
+            let mut response = serde_json::json!({
+                "success": true,
+                "transaction_id": transaction_id,
+                "message": format!("Transaction confirmed for vessel: {} (target volume: {:.2} L)", 
+                                   request.vessel_name, request.liquid_target_volume),
+                "timestamp": Utc::now(),
+                "flow_type": request.flow_type,
+                "vessel_id": request.vessel_id,
+            });
+            
+            // Add GPS data to response with Unix timestamp
+            if let Some(gps) = &transaction.gps_latitude.zip(transaction.gps_longitude) {
+                response["location"] = serde_json::json!({
+                    "latitude": gps.0,
+                    "longitude": gps.1,
+                    "altitude": transaction.gps_altitude,
+                    "speed": transaction.gps_speed,
+                    "course": transaction.gps_course,
+                    "satellites": transaction.gps_satellites,
+                    "unix_timestamp": transaction.gps_timestamp
+                });
+            }
+
+            Ok(HttpResponse::Ok().json(response))
         },
         Err(e) => {
             error!("❌ Failed to store transaction: {}", e);

@@ -44,6 +44,9 @@ pub struct Config {
 
     // ADD: API server configuration
     pub api_server: ApiServerConfig,
+
+    // NEW: GPS configuration
+    pub gps: GpsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,6 +220,26 @@ impl Default for ApiServerConfig {
     }
 }
 
+// Add GPS configuration struct
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpsConfig {
+    pub enabled: bool,
+    pub port: String,
+    pub baud_rate: u32,
+    pub auto_start: bool,
+}
+
+impl Default for GpsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: "/dev/ttyUSB2".to_string(),
+            baud_rate: 9600,
+            auto_start: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteInfo {
     pub site_id: String,
@@ -374,6 +397,9 @@ impl Default for Config {
             
             // API server configuration
             api_server: ApiServerConfig::default(),
+
+            // GPS configuration
+            gps: GpsConfig::default(),
         }
     }
 }

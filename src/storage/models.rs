@@ -59,6 +59,10 @@ impl FlowmeterReading {
     }
 }
 
+// Add GPS import
+use crate::devices::gps::GpsData;
+
+// Update Transaction struct
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Transaction {
     pub id: Option<i64>,
@@ -84,6 +88,15 @@ pub struct Transaction {
     pub supplier_name: Option<String>,
     pub created_at: i64, // Unix timestamp
     pub status: String,
+
+    // NEW: GPS location data
+    pub gps_latitude: Option<f64>,
+    pub gps_longitude: Option<f64>,
+    pub gps_altitude: Option<f32>,
+    pub gps_speed: Option<f32>,
+    pub gps_course: Option<f32>,
+    pub gps_satellites: Option<u32>,
+    pub gps_timestamp: Option<i64>,
 }
 
 impl Transaction {
@@ -109,6 +122,7 @@ impl Transaction {
         customer_location_name: Option<String>,
         supplier_name: Option<String>,
         status: String,
+        gps_data: Option<GpsData>, // NEW parameter
     ) -> Self {
         Self {
             id: None,
@@ -134,6 +148,14 @@ impl Transaction {
             supplier_name,
             created_at: Utc::now().timestamp(),
             status,
+            // NEW: GPS fields
+            gps_latitude: gps_data.as_ref().and_then(|g| g.latitude),
+            gps_longitude: gps_data.as_ref().and_then(|g| g.longitude),
+            gps_altitude: gps_data.as_ref().and_then(|g| g.altitude),
+            gps_speed: gps_data.as_ref().and_then(|g| g.speed),
+            gps_course: gps_data.as_ref().and_then(|g| g.course),
+            gps_satellites: gps_data.as_ref().and_then(|g| g.satellites),
+            gps_timestamp: gps_data.as_ref().and_then(|g| g.timestamp),
         }
     }
 }

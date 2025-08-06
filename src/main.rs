@@ -317,6 +317,30 @@ fn build_cli() -> Command {
                 .subcommand(Command::new("status").about("Show WebSocket server status"))
                 .subcommand(Command::new("clients").about("Show connected WebSocket clients"))
         )
+        .subcommand(
+            Command::new("gps")
+                .about("GPS location and tracking commands")
+                .subcommand(
+                    Command::new("start")
+                        .about("Start GPS service")
+                )
+                .subcommand(
+                    Command::new("stop")
+                        .about("Stop GPS service")
+                )
+                .subcommand(
+                    Command::new("status")
+                        .about("Show GPS service status")
+                )
+                .subcommand(
+                    Command::new("data")
+                        .about("Show current GPS data and location")
+                )
+                .subcommand(
+                    Command::new("test")
+                        .about("Test GPS connection and wait for fix")
+                )
+        )
 }
 
 
@@ -531,6 +555,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_service.stop().await?;
         }
         return Ok(());
+    }
+
+    // NEW: Handle GPS commands - add this right after websocket commands
+    if let Some(gps_matches) = matches.subcommand_matches("gps") {
+        if cli::commands::handle_gps_commands(gps_matches, &service).await? {
+            // Stop services before returning
+            if let Some(mut api_service) = api_service_handle {
+                api_service.stop().await?;
+            }
+            return Ok(());
+        }
     }
 
     // Handle other subcommands
