@@ -37,13 +37,21 @@ pub struct DataService {
     gps_service: Option<GpsService>,
 }
 
-// NEW: Structure to track active transaction with volume
+// NEW: Enhanced structure to track active transaction with timestamps and inventory
 #[derive(Debug, Clone)]
 struct ActiveTransaction {
     transaction_id: String,
     target_volume: f32,
     current_volume: f32,
     vessel_name: String,
+    
+    // NEW: Timestamps
+    ts_start: i64,
+    ts_end: Option<i64>,
+    
+    // NEW: Inventory values
+    inv_start: f32,
+    inv_end: Option<f32>,
 }
 
 impl Clone for DataService {
@@ -221,13 +229,18 @@ impl DataService {
                     Ok(data) => {
                         // Send data to WebSocket client
                         if let Some(ws_server) = &self.websocket_server {
-                            let response = json!({
+                            let mut response = json!({
                                 "endpoint": "/flowmeter/read",
                                 "status": "success",
                                 "data": data.get_all_parameters(),
                                 "timestamp": chrono::Utc::now().timestamp(),
                                 "id": request_id
                             });
+                            
+                            // Add transaction progress if active
+                            // if let Some(progress) = self.get_transaction_progress().await {
+                            //     response["transaction_progress"] = progress;
+                            // }
                             
                             ws_server.send_to_client(&client_id, &response).await?;
                         }
@@ -278,7 +291,7 @@ impl DataService {
                     })
                     .collect();
                 
-                let response = json!({
+                let mut response = json!({
                     "endpoint": "/flowmeter/read",
                     "status": "success",
                     "timestamp": chrono::Utc::now().timestamp(),
@@ -287,6 +300,11 @@ impl DataService {
                     "devices": devices_data,
                     "id": request_id
                 });
+                
+                // Add transaction progress if active
+                // if let Some(progress) = self.get_transaction_progress().await {
+                //     response["transaction_progress"] = progress;
+                // }
                 
                 ws_server.send_to_client(&client_id, &response).await?;
             }
@@ -1064,12 +1082,22 @@ impl DataService {
                             if let Some(tx_id) = &active_transaction_id {
                                 message["transaction_id"] = json!(tx_id);
                                 
-                                // Add progress info
+                                // Add progress info with new format
                                 if let Some(active_tx) = service.active_transaction.lock().await.as_ref() {
+                                    // Get current inventory for inv_end (if transaction not completed yet)
+                                    let current_inv = data.get_parameters_as_floats()
+                                        .get("VolumeInventory")
+                                        .copied()
+                                        .unwrap_or(active_tx.inv_start);
+                                    
                                     message["transaction_progress"] = json!({
                                         "current_volume": active_tx.current_volume,
-                                        "target_volume": active_tx.target_volume,
+                                        "ts_start": active_tx.ts_start,
+                                        "inv_start": active_tx.inv_start,
+                                        "ts_end": active_tx.ts_end.unwrap_or(chrono::Utc::now().timestamp()),
+                                        "inv_end": active_tx.inv_end.unwrap_or(current_inv),
                                         "progress_percentage": (active_tx.current_volume / active_tx.target_volume) * 100.0,
+                                        "target_volume": active_tx.target_volume,
                                         "vessel_name": active_tx.vessel_name
                                     });
                                 }
@@ -1181,16 +1209,35 @@ impl DataService {
 
     // NEW: Method to start transaction with volume tracking
     pub async fn start_transaction_with_volume(&self, transaction_id: String, target_volume: f32, vessel_name: String) {
+        // Capture start inventory from first available device data
+        let inv_start = if let Ok(device_data_map) = self.device_data.lock() {
+            if let Some((_, data)) = device_data_map.iter().next() {
+                let params = data.get_parameters_as_floats();
+                // Use VolumeInventory as the primary inventory value
+                params.get("VolumeInventory").copied().unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let ts_start = chrono::Utc::now().timestamp();
+
         let mut active_tx = self.active_transaction.lock().await;
         *active_tx = Some(ActiveTransaction {
             transaction_id: transaction_id.clone(),
             target_volume,
             current_volume: 0.0,
             vessel_name: vessel_name.clone(),
+            ts_start,
+            ts_end: None,
+            inv_start,
+            inv_end: None,
         });
-        
-        info!("🔗 Started transaction {} for vessel '{}' with target volume: {:.2} L", 
-              transaction_id, vessel_name, target_volume);
+
+        info!("🔗 Started transaction {} for vessel '{}' at {} with target volume: {:.2} L (start inventory: {:.2})", 
+              transaction_id, vessel_name, ts_start, target_volume, inv_start);
     }
 
     // NEW: Method to get current active transaction ID (only if volume not reached)
@@ -1224,8 +1271,27 @@ impl DataService {
                 let completed_tx_id = active_tx.transaction_id.clone();
                 let vessel_name = active_tx.vessel_name.clone();
                 
+                // Set end timestamp and inventory
+                let ts_end = chrono::Utc::now().timestamp();
+                active_tx.ts_end = Some(ts_end);
+                
+                // Get current inventory as end inventory
+                let inv_end = if let Ok(device_data_map) = self.device_data.lock() {
+                    if let Some((_, data)) = device_data_map.iter().next() {
+                        let params = data.get_parameters_as_floats();
+                        params.get("VolumeInventory").copied().unwrap_or(active_tx.inv_start)
+                    } else {
+                        active_tx.inv_start
+                    }
+                } else {
+                    active_tx.inv_start
+                };
+                active_tx.inv_end = Some(inv_end);
+                
                 info!("🎯 Transaction {} for vessel '{}' COMPLETED! Target volume {:.2} L reached", 
                       completed_tx_id, vessel_name, active_tx.target_volume);
+                info!("📊 Inventory change: {:.2} → {:.2} L (Δ {:.2})", 
+                      active_tx.inv_start, inv_end, inv_end - active_tx.inv_start);
                 
                 // Update transaction status in database
                 if let Some(db_service) = &self.database_service {
@@ -1300,4 +1366,34 @@ impl DataService {
             Ok("GPS not available".to_string())
         }
     }
+
+    // NEW: Method to get current transaction progress (for API endpoints)
+    // pub async fn get_transaction_progress(&self) -> Option<serde_json::Value> {
+    //     if let Some(active_tx) = self.active_transaction.lock().await.as_ref() {
+    //         // Get current inventory value
+    //         let current_inv = if let Ok(device_data_map) = self.device_data.lock() {
+    //             if let Some((_, data)) = device_data_map.iter().next() {
+    //                 let params = data.get_parameters_as_floats();
+    //                 params.get("VolumeInventory").copied().unwrap_or(active_tx.inv_start)
+    //             } else {
+    //                 active_tx.inv_start
+    //             }
+    //         } else {
+    //             active_tx.inv_start
+    //         };
+
+    //         Some(json!({
+    //             "current_volume": active_tx.current_volume,
+    //             "ts_start": active_tx.ts_start,
+    //             "inv_start": active_tx.inv_start,
+    //             "ts_end": active_tx.ts_end.unwrap_or(chrono::Utc::now().timestamp()),
+    //             "inv_end": active_tx.inv_end.unwrap_or(current_inv),
+    //             "progress_percentage": (active_tx.current_volume / active_tx.target_volume) * 100.0,
+    //             "target_volume": active_tx.target_volume,
+    //             "vessel_name": active_tx.vessel_name
+    //         }))
+    //     } else {
+    //         None
+    //     }
+    // }
 }

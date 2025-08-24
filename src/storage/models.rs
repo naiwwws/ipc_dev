@@ -18,8 +18,9 @@ pub struct FlowmeterReading {
     pub volume_flow_rate: f32,
     pub mass_total: f32,
     pub volume_total: f32,
+    pub volume_inventory: f32,
+    pub mass_inventory: f32,
     pub error_code: u16,
-    
     // NEW: Transaction linking
     pub transaction_id: Option<String>,
 }
@@ -53,6 +54,8 @@ impl FlowmeterReading {
             volume_flow_rate: flowmeter_data.volume_flow_rate,
             mass_total: flowmeter_data.mass_total,
             volume_total: flowmeter_data.volume_total,
+            volume_inventory: flowmeter_data.volume_inventory,
+            mass_inventory: flowmeter_data.mass_inventory,
             error_code: flowmeter_data.error_code,
             transaction_id,
         }
