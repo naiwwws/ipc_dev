@@ -88,6 +88,8 @@ impl SqliteManager {
                 volume_flow_rate REAL NOT NULL,
                 mass_total REAL NOT NULL,
                 volume_total REAL NOT NULL,
+                volume_inventory REAL NOT NULL,
+                mass_inventory REAL NOT NULL,
                 error_code INTEGER NOT NULL DEFAULT 0,
                 
                 -- NEW: Transaction linking
