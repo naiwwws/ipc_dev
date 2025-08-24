@@ -342,7 +342,7 @@ impl SqliteManager {
                     device_address, unix_timestamp, mass_flow_rate, density_flow, 
                     temperature, volume_flow_rate, mass_total, volume_total, volume_inventory, mass_inventory, error_code,
                     transaction_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#)
             .bind(reading.device_address)
             .bind(reading.unix_timestamp)
