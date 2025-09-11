@@ -4,4 +4,3 @@ pub mod gps; // NEW: GPS module
 
 pub use traits::{Device, DeviceData};
 pub use flowmeter::{FlowmeterDevice, FlowmeterData};
- // NEW: GPS exports
