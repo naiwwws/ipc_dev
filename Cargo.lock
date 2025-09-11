@@ -2005,7 +2005,7 @@ dependencies = [
 
 [[package]]
 name = "serialport"
-version = "4.7.3-alpha.0"
+version = "4.7.4-alpha.0"
 dependencies = [
  "assert_hex",
  "bitflags 2.9.1",
@@ -2028,7 +2028,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "unescaper",
- "winapi",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

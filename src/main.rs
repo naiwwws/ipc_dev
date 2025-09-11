@@ -11,7 +11,10 @@ use anyhow::Result;
 use clap::{Arg, Command}; // Add ArgMatches import
 use log::info;
 
-use services::{DataService, ApiService}; // Fixed import
+use services::DataService;
+#[cfg(feature = "sqlite")]
+use services::ApiService;
+#[cfg(feature = "sqlite")]
 use crate::services::api_service::ApiServiceState;
 use config::{Config, DynamicConfigManager};
 use ipc_dev_rust::{VERSION};
@@ -519,9 +522,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Database: {}", if db_enabled { "enabled" } else { "disabled" });
 
     let mut service = DataService::new(config.clone()).await?;
+    #[cfg(feature = "sqlite")]
     let mut api_service_handle: Option<crate::services::ApiService> = None;
 
     // ✅ FIXED: Start API service based on TOML config, not just CLI
+    #[cfg(feature = "sqlite")]
     if config.api_server.enabled {
         if let Some(db_service) = service.get_database_service() {
             let sqlite_manager = db_service.get_sqlite_manager().clone();
@@ -544,13 +549,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             info!("⚠️  Database not available for API service");
         }
-    } else {
+    }
+    #[cfg(not(feature = "sqlite"))]
+    if config.api_server.enabled {
+        info!("⚠️  API server disabled - sqlite feature not enabled");
+    }
+    
+    #[cfg(feature = "sqlite")]
+    if !config.api_server.enabled {
         info!("📝 API server disabled in config");
     }
 
     // Handle WebSocket commands before other subcommands
     if handle_websocket_commands(&matches, &service).await? {
         // Stop services before returning
+        #[cfg(feature = "sqlite")]
         if let Some(mut api_service) = api_service_handle {
             api_service.stop().await?;
         }
@@ -561,6 +574,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(gps_matches) = matches.subcommand_matches("gps") {
         if cli::commands::handle_gps_commands(gps_matches, &service).await? {
             // Stop services before returning
+            #[cfg(feature = "sqlite")]
             if let Some(mut api_service) = api_service_handle {
                 api_service.stop().await?;
             }
@@ -571,6 +585,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handle other subcommands
     if handle_subcommands(&matches, &mut service).await? {
         // Stop services before returning
+        #[cfg(feature = "sqlite")]
         if let Some(mut api_service) = api_service_handle {
             api_service.stop().await?;
         }
@@ -652,6 +667,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🔄 Shutting down services...");
     
     // Stop API service first
+    #[cfg(feature = "sqlite")]
     if let Some(mut api_service) = api_service_handle {
         info!("🛑 Stopping API service...");
         if let Err(e) = api_service.stop().await {

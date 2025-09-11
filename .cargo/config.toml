@@ -1,0 +1,12 @@
+# Cross-compilation configuration for ARM Linux
+# Use alternative TLS backend to avoid ring crate compilation issues
+
+[target.armv7-unknown-linux-gnueabihf]
+# Use system linker for cross-compilation
+# Note: This requires installing ARM cross-compilation toolchain
+# On macOS: brew install arm-linux-gnueabihf-binutils
+linker = "arm-linux-gnueabihf-ld"
+
+[build]
+# Uncomment the line below to set a default target
+# target = "armv7-unknown-linux-gnueabihf"

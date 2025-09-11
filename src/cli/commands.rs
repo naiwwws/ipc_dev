@@ -110,6 +110,7 @@ pub async fn handle_subcommands(
     }
 
     // Handle database commands
+    #[cfg(feature = "sqlite")]
     if let Some(matches) = matches.subcommand_matches("db") {
         if let Some(sub_matches) = matches.subcommand_matches("query") {
             let device_address: Option<u8> = sub_matches.get_one::<String>("device")
@@ -127,18 +128,27 @@ pub async fn handle_subcommands(
             return Ok(true);
         }
         
+        #[cfg(feature = "sqlite")]
         if let Some(_) = matches.subcommand_matches("stats") {
             info!("📊 Executing flowmeter stats command...");
             service.get_flowmeter_stats().await?;
             return Ok(true);
         }
         
+        #[cfg(not(feature = "sqlite"))]
+        if let Some(_) = matches.subcommand_matches("stats") {
+            println!("❌ Stats command requires sqlite feature");
+            return Ok(true);
+        }
+        
+        #[cfg(feature = "sqlite")]
         if let Some(sub_matches) = matches.subcommand_matches("recent") {
             info!("📋 Executing flowmeter recent command...");
             
             let limit: i64 = sub_matches.get_one::<String>("limit").unwrap_or(&"20".to_string()).parse()
                 .map_err(|_| anyhow!("Invalid limit"))?;
                 
+            #[cfg(feature = "sqlite")]
             if let Some(db_service) = service.get_database_service() {
                 let readings = db_service.get_recent_flowmeter_readings(limit).await?;
                 
@@ -162,10 +172,23 @@ pub async fn handle_subcommands(
             }
             return Ok(true);
         }
+        
+        #[cfg(not(feature = "sqlite"))]
+        if let Some(_) = matches.subcommand_matches("recent") {
+            println!("❌ Recent command requires sqlite feature");
+            return Ok(true);
+        }
+    }
+    
+    #[cfg(not(feature = "sqlite"))]
+    if let Some(_) = matches.subcommand_matches("db") {
+        println!("❌ Database commands require sqlite feature");
+        return Ok(true);
     }
 
     // Handle flowmeter commands
     if let Some(matches) = matches.subcommand_matches("flowmeter") {
+        #[cfg(feature = "sqlite")]
         if let Some(sub_matches) = matches.subcommand_matches("query") {
             info!("📋 Executing flowmeter query command...");
             
@@ -179,9 +202,22 @@ pub async fn handle_subcommands(
             return Ok(true);
         }
         
+        #[cfg(not(feature = "sqlite"))]
+        if let Some(_) = matches.subcommand_matches("query") {
+            println!("❌ Query command requires sqlite feature");
+            return Ok(true);
+        }
+        
+        #[cfg(feature = "sqlite")]
         if let Some(_) = matches.subcommand_matches("stats") {
             info!("📊 Executing flowmeter stats command...");
             service.get_flowmeter_stats().await?;
+            return Ok(true);
+        }
+        
+        #[cfg(not(feature = "sqlite"))]
+        if let Some(_) = matches.subcommand_matches("stats") {
+            println!("❌ Stats command requires sqlite feature");
             return Ok(true);
         }
         
@@ -191,6 +227,7 @@ pub async fn handle_subcommands(
             let limit: i64 = sub_matches.get_one::<String>("limit").unwrap_or(&"20".to_string()).parse()
                 .map_err(|_| anyhow!("Invalid limit"))?;
                 
+            #[cfg(feature = "sqlite")]
             if let Some(db_service) = service.get_database_service() {
                 let readings = db_service.get_recent_flowmeter_readings(limit).await?;
                 
@@ -212,6 +249,12 @@ pub async fn handle_subcommands(
             } else {
                 println!("❌ Database service not enabled");
             }
+            return Ok(true);
+        }
+        
+        #[cfg(not(feature = "sqlite"))]
+        if let Some(_) = matches.subcommand_matches("recent") {
+            println!("❌ Recent command requires sqlite feature");
             return Ok(true);
         }
     }
@@ -402,9 +445,16 @@ pub async fn handle_websocket_commands(
             return Ok(true);
         }
         
+        #[cfg(feature = "sqlite")]
         if let Some(_) = matches.subcommand_matches("send-stats") {
             service.send_flowmeter_stats_via_websocket().await?;
             println!("📊 Triggered flowmeter statistics broadcast to WebSocket clients");
+            return Ok(true);
+        }
+        
+        #[cfg(not(feature = "sqlite"))]
+        if let Some(_) = matches.subcommand_matches("send-stats") {
+            println!("❌ Send-stats command requires sqlite feature");
             return Ok(true);
         }
     }

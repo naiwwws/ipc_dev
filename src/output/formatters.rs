@@ -1,9 +1,5 @@
-use chrono::Utc;
-use serde_json::Value;
-use std::collections::HashMap;
 
 use crate::devices::traits::DeviceData;
-use crate::utils::error::ModbusError;
 
 pub trait DataFormatter: Send + Sync {
     fn format_single_device(&self, addr: u8, data: &dyn DeviceData) -> String;

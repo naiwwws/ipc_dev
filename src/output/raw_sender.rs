@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use log::{info, error};
+use log::info;
 use std::fs::OpenOptions;
 use std::io::Write;
 use tokio::fs;

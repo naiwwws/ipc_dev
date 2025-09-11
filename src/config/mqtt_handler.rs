@@ -1,4 +1,4 @@
-use log::{info, warn, error};
+use log::{info, error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;

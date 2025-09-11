@@ -20,6 +20,8 @@ pub use devices::{Device, DeviceData, FlowmeterDevice, FlowmeterData};
 pub use modbus::ModbusClient;
 pub use output::{DataFormatter, DataSender, ConsoleFormatter, JsonFormatter, CsvFormatter, HexFormatter};
 pub use utils::error::ModbusError;
-pub use storage::{SqliteManager, FlowmeterReading, FlowmeterStats};
+#[cfg(feature = "sqlite")]
+pub use storage::SqliteManager;
+pub use storage::{FlowmeterReading, FlowmeterStats};
 
 pub const VERSION: &str = "1.0.0";

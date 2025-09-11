@@ -1,11 +1,13 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "sqlite")]
 use sqlx::FromRow;
 
 use crate::devices::traits::DeviceData;
 
 // MINIMAL: Essential flowmeter reading structure
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlite", derive(FromRow))]
 pub struct FlowmeterReading {
     pub id: Option<i64>,
     pub device_address: u8,
@@ -26,7 +28,8 @@ pub struct FlowmeterReading {
 }
 
 // Keep minimal stats structure
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlite", derive(FromRow))]
 pub struct FlowmeterStats {
     pub total_readings: i64,
     pub avg_mass_flow_rate: Option<f32>,
@@ -66,7 +69,8 @@ impl FlowmeterReading {
 use crate::devices::gps::GpsData;
 
 // Update Transaction struct
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlite", derive(FromRow))]
 pub struct Transaction {
     pub id: Option<i64>,
     pub transaction_id: String,
