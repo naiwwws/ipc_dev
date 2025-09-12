@@ -1,8 +1,7 @@
-use log::{info, error, warn, debug};
+use log::{info, error, debug};
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
-use tokio::time::{interval, Duration};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 
 use crate::config::Config;
 use crate::devices::traits::DeviceData;

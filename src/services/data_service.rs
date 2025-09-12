@@ -1,7 +1,6 @@
 use log::{error, info, warn, debug};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, interval, Duration};
 use tokio::sync::mpsc;
 use serde_json::json;
 use crate::services::socket_server::WebSocketRequest;
@@ -11,6 +10,7 @@ use crate::modbus::ModbusClient;
 use crate::devices::{Device, DeviceData, FlowmeterDevice};
 use crate::output::{DataFormatter, DataSender, ConsoleFormatter, ConsoleSender};
 use crate::output::raw_sender::{RawDataSender, RawDataFormat};
+#[cfg(feature = "sqlite")]
 use crate::services::DatabaseService;
 use crate::services::socket_server::WebSocketServer;
 use crate::utils::error::ModbusError;
@@ -25,6 +25,7 @@ pub struct DataService {
     modbus_client: Arc<ModbusClient>,
     formatter: Box<dyn DataFormatter>,
     senders: Vec<Box<dyn DataSender>>,
+    #[cfg(feature = "sqlite")]
     database_service: Option<DatabaseService>,
     websocket_server: Option<Arc<WebSocketServer>>,
     streaming_clients: Arc<TokioMutex<usize>>,
@@ -81,6 +82,7 @@ impl Clone for DataService {
             modbus_client: self.modbus_client.clone(),
             formatter: Box::new(ConsoleFormatter),
             senders: Vec::new(),
+            #[cfg(feature = "sqlite")]
             database_service: self.database_service.clone(),
             websocket_server: self.websocket_server.clone(),
             streaming_clients: self.streaming_clients.clone(),
@@ -121,6 +123,7 @@ impl DataService {
         }
 
         // Initialize and start database service
+        #[cfg(feature = "sqlite")]
         let database_service = if config.output.database_output.as_ref().map(|db| db.enabled).unwrap_or(false) {
             match DatabaseService::new(config.clone()).await {
                 Ok(db_service) => {
@@ -198,6 +201,7 @@ impl DataService {
             modbus_client,
             formatter,
             senders,
+            #[cfg(feature = "sqlite")]
             database_service,
             websocket_server: websocket_server.as_ref().map(|(server, _)| server.clone()),
             streaming_clients: Arc::new(TokioMutex::new(0)),
@@ -232,7 +236,7 @@ impl DataService {
                     Ok(data) => {
                         // Send data to WebSocket client
                         if let Some(ws_server) = &self.websocket_server {
-                            let mut response = json!({
+                            let response = json!({
                                 "endpoint": "/flowmeter/read",
                                 "status": "success",
                                 "data": data.get_all_parameters(),
@@ -294,7 +298,7 @@ impl DataService {
                     })
                     .collect();
                 
-                let mut response = json!({
+                let response = json!({
                     "endpoint": "/flowmeter/read",
                     "status": "success",
                     "timestamp": chrono::Utc::now().timestamp(),
@@ -319,6 +323,7 @@ impl DataService {
         Ok(())
     }
 
+    #[cfg(feature = "sqlite")]
     async fn handle_recent_readings_request(
         &self, 
         client_id: String, 
@@ -358,6 +363,7 @@ impl DataService {
         Ok(())
     }
 
+    #[cfg(feature = "sqlite")]
     async fn handle_stats_request(
         &self, 
         client_id: String,
@@ -467,6 +473,7 @@ impl DataService {
                 info!("🔗 Cleared active transaction {} (streaming stopped)", tx.transaction_id);
                 
                 // Update transaction status to 'cancelled' if not completed
+                #[cfg(feature = "sqlite")]
                 if let Some(db_service) = &self.database_service {
                     if let Err(e) = db_service.update_transaction_status(&tx.transaction_id, "cancelled").await {
                         error!("❌ Failed to update transaction status: {}", e);
@@ -530,6 +537,7 @@ impl DataService {
     }
 
     //  Database storage method
+    #[cfg(feature = "sqlite")]
     async fn store_device_data_to_database(
         &self,
         device_address: u8,
@@ -555,6 +563,12 @@ impl DataService {
         Ok(())
     }
 
+    #[cfg(not(feature = "sqlite"))]
+    pub async fn trigger_flowmeter_readings_via_websocket(&self) -> Result<(), ModbusError> {
+        warn!("Database service not available - SQLite feature not enabled");
+        Ok(())
+    }
+
     // Helper method
     fn get_uuid_from_address(&self, address: u8) -> Option<&String> {
         self.device_address_to_uuid.get(&address)
@@ -566,10 +580,17 @@ impl DataService {
         info!("⚙️  Debug output: {}", if debug_output { "enabled" } else { "disabled" });
         
         // Database status
+        #[cfg(feature = "sqlite")]
         if let Some(_) = &self.database_service {
             info!("💾 Database storage: ENABLED");
-        } else {
+        }
+        #[cfg(feature = "sqlite")]
+        if self.database_service.is_none() {
             info!("📝 Database storage: DISABLED");
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            info!("📝 Database storage: DISABLED (SQLite feature not enabled)");
         }
 
         // Start WebSocket server if enabled
@@ -621,6 +642,7 @@ impl DataService {
     }
 
     // Add method to trigger flowmeter readings via WebSocket
+    #[cfg(feature = "sqlite")]
     pub async fn trigger_flowmeter_readings_via_websocket(&self) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
             if let Some(ws_server) = &self.websocket_server {
@@ -633,6 +655,7 @@ impl DataService {
     }
 
     // Add method to send flowmeter stats via WebSocket
+    #[cfg(feature = "sqlite")]
     pub async fn send_flowmeter_stats_via_websocket(&self) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
             if let Some(ws_server) = &self.websocket_server {
@@ -661,6 +684,7 @@ impl DataService {
                         .unwrap_or_else(|| "unknown".to_string());
                     
                     //  Store in database if database service is available
+                    #[cfg(feature = "sqlite")]
                     if let Err(e) = self.store_device_data_to_database(device_address, data.as_ref()).await {
                         error!("Failed to store device data: {}", e);
                     }
@@ -881,14 +905,17 @@ impl DataService {
         self.senders.push(sender);
     }
 
+    #[cfg(feature = "sqlite")]
     pub fn get_database_service(&self) -> Option<&DatabaseService> {
         self.database_service.as_ref()
     }
 
+    #[cfg(feature = "sqlite")]
     pub fn get_database_service_mut(&mut self) -> Option<&mut DatabaseService> {
         self.database_service.as_mut()
     }
 
+    #[cfg(feature = "sqlite")]
     pub async fn check_database_health(&self) -> Result<Option<bool>, ModbusError> {
         if let Some(db_service) = &self.database_service {
             match db_service.get_flowmeter_stats().await {
@@ -901,6 +928,7 @@ impl DataService {
     }
 
     // MINIMAL: Updated query method
+    #[cfg(feature = "sqlite")]
     pub async fn query_flowmeter_data(&self, device_address: u8, limit: i64) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
             let readings = db_service.get_device_flowmeter_readings(device_address, None, Some(limit)).await?;
@@ -927,6 +955,7 @@ impl DataService {
     }
 
     // MINIMAL: Updated stats method
+    #[cfg(feature = "sqlite")]
     pub async fn get_flowmeter_stats(&self) -> Result<(), ModbusError> {
         if let Some(db_service) = &self.database_service {
             let stats = db_service.get_flowmeter_stats().await?;
@@ -1019,7 +1048,7 @@ impl DataService {
 
                         // Update transaction with current VolumeTotal
                         let active_transaction_id = service.update_transaction_with_volume_total(current_volume_total).await;
-
+                        #[cfg(feature = "sqlite")]
                         // Store to database with transaction ID
                         if let Some(db_service) = &service.database_service {
                             if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
@@ -1122,6 +1151,7 @@ impl DataService {
             }
             WebSocketRequest::GetRecentReadings { client_id, limit, request_id } => {
                 // Handle recent readings request
+                #[cfg(feature = "sqlite")]
                 if let Some(db_service) = &self.database_service {
                     if let Some(ws_server) = &self.websocket_server {
                         match db_service.get_recent_flowmeter_readings(limit).await {
@@ -1152,6 +1182,7 @@ impl DataService {
             }
             WebSocketRequest::GetStats { client_id, request_id } => {
                 // Handle stats request
+                #[cfg(feature = "sqlite")]
                 if let Some(db_service) = &self.database_service {
                     if let Some(ws_server) = &self.websocket_server {
                         match db_service.get_flowmeter_stats().await {
@@ -1299,6 +1330,7 @@ impl DataService {
                       current_volume_total, dispensed_volume, active_tx.inv_start, inv_end);
                 
                 // Update transaction status in database
+                #[cfg(feature = "sqlite")]
                 if let Some(db_service) = &self.database_service {
                     if let Err(e) = db_service.update_transaction_status(&completed_tx_id, "completed").await {
                         error!("❌ Failed to update transaction status: {}", e);
