@@ -43,14 +43,17 @@ pub struct DataService {
 struct ActiveTransaction {
     transaction_id: String,
     target_volume: f32,
-    current_volume: f32,
     vessel_name: String,
     
-    // NEW: Timestamps
+    // NEW: Use VolumeTotal from flowmeter as reference
+    start_volume_total: f32,    // VolumeTotal when transaction started
+    current_volume_total: f32,  // Current VolumeTotal from flowmeter
+    
+    // Timestamps
     ts_start: i64,
     ts_end: Option<i64>,
     
-    // NEW: Inventory values
+    // Inventory values
     inv_start: f32,
     inv_end: Option<f32>,
 }
@@ -1018,7 +1021,7 @@ impl DataService {
         let interval_duration = tokio::time::Duration::from_secs(service.config.update_interval_seconds);
         let mut interval = tokio::time::interval(interval_duration);
 
-        info!("🔄 Started flowmeter polling loop with volume-based transaction tracking");
+        info!("🔄 Started flowmeter polling loop with VolumeTotal-based transaction tracking");
 
         loop {
             interval.tick().await;
@@ -1038,41 +1041,15 @@ impl DataService {
                 
                 match device.read_data(service.modbus_client.as_ref()).await {
                     Ok(data) => {
-                        // Calculate volume delta from previous reading
-                        let current_volume = data.get_parameters_as_floats()
-                            .get("VolumeTotal")
-                            .copied()
-                            .unwrap_or(0.0);
+                        let params = data.get_parameters_as_floats();
+                        let current_volume_total = params.get("VolumeTotal").copied().unwrap_or(0.0);
                         
-                        // Get previous volume for delta calculation
-                        let volume_delta = if let Ok(device_data_map) = service.device_data.lock() {
-                            if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
-                                if let Some(prev_data) = device_data_map.get(uuid) {
-                                    let prev_volume = prev_data.get_parameters_as_floats()
-                                        .get("VolumeTotal")
-                                        .copied()
-                                        .unwrap_or(0.0);
-                                    current_volume - prev_volume
-                                } else {
-                                    0.0 // First reading
-                                }
-                            } else {
-                                0.0
-                            }
-                        } else {
-                            0.0
-                        };
+                        info!("📊 Device {} VolumeTotal: {:.2} L", addr, current_volume_total);
 
-                        // Update transaction volume and get current transaction ID
-                        let active_transaction_id = if volume_delta >= 0.0 {
-                            service.update_transaction_volume(volume_delta).await
-                        } else {
-                            service.get_active_transaction_id().await
-                        };
-                        
-                        
-                        // Store to database with transaction ID (if active and volume not reached)
-                        #[cfg(feature = "sqlite")]
+                        // Update transaction with current VolumeTotal
+                        let active_transaction_id = service.update_transaction_with_volume_total(current_volume_total).await;
+
+                        // Store to database with transaction ID
                         if let Some(db_service) = &service.database_service {
                             if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
                                 if let Err(e) = db_service.store_device_data_with_transaction(
@@ -1082,22 +1059,20 @@ impl DataService {
                                     active_transaction_id.clone()
                                 ).await {
                                     error!("❌ Failed to store device {} data: {}", addr, e);
+                                } else {
+                                    debug!("✅ Stored device {} data with transaction: {:?}", addr, active_transaction_id);
                                 }
                             }
                         }
-                        if let Some(tx_id) = &active_transaction_id {
-                            info!("🔗 Storing reading with transaction: {}", tx_id);
-                        } else {
-                            info!("📝 Storing reading without transaction");
-                        }
+
                         // Update device data cache
                         if let Ok(mut device_data_map) = service.device_data.lock() {
                             if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
-                                device_data_map.insert(uuid.clone(), data.clone_box()); // FIXED: Use clone_box()
+                                device_data_map.insert(uuid.clone(), data.clone_box());
                             }
                         }
                         
-                        // Send to WebSocket clients with transaction ID
+                        // Send to WebSocket clients with updated transaction progress
                         if let Some(ws_server) = &service.websocket_server {
                             let mut message = json!({
                                 "endpoint": "/flowmeter/read",
@@ -1105,30 +1080,42 @@ impl DataService {
                                 "device_address": addr,
                                 "device_name": device.name(),
                                 "timestamp": chrono::Utc::now().timestamp(),
-                                "data": data.get_parameters_as_floats()
+                                "data": params
                             });
                             
                             // Add transaction info if active
                             if let Some(tx_id) = &active_transaction_id {
                                 message["transaction_id"] = json!(tx_id);
                                 
-                                // Add progress info with new format
+                                // Add progress info using VolumeTotal calculation
                                 if let Some(active_tx) = service.active_transaction.lock().await.as_ref() {
-                                    // Get current inventory for inv_end (if transaction not completed yet)
-                                    let current_inv = data.get_parameters_as_floats()
-                                        .get("VolumeInventory")
-                                        .copied()
-                                        .unwrap_or(active_tx.inv_start);
+                                    let current_time = chrono::Utc::now().timestamp();
+                                    let current_inv = params.get("VolumeInventory").copied().unwrap_or(active_tx.inv_start);
+                                    
+                                    // Calculate dispensed volume and progress percentage
+                                    let dispensed_volume = active_tx.current_volume_total - active_tx.start_volume_total;
+                                    let progress_percentage = if active_tx.target_volume > 0.0 {
+                                        (dispensed_volume / active_tx.target_volume) * 100.0
+                                    } else {
+                                        0.0
+                                    };
                                     
                                     message["transaction_progress"] = json!({
-                                        "current_volume": active_tx.current_volume,
+                                        "current_volume": dispensed_volume,           // Dispensed volume (not total)
                                         "ts_start": active_tx.ts_start,
                                         "inv_start": active_tx.inv_start,
-                                        "ts_end": active_tx.ts_end.unwrap_or(chrono::Utc::now().timestamp()),
+                                        "ts_end": active_tx.ts_end.unwrap_or(current_time),
                                         "inv_end": active_tx.inv_end.unwrap_or(current_inv),
-                                        "progress_percentage": (active_tx.current_volume / active_tx.target_volume) * 100.0,
+                                        "progress_percentage": progress_percentage,
                                         "target_volume": active_tx.target_volume,
-                                        "vessel_name": active_tx.vessel_name
+                                        "vessel_name": active_tx.vessel_name,
+                                        // Debug info
+                                        "debug": {
+                                            "start_volume_total": active_tx.start_volume_total,
+                                            "current_volume_total": active_tx.current_volume_total,
+                                            "dispensed_volume": dispensed_volume,
+                                            "volume_flow_rate": params.get("VolumeFlowRate").copied().unwrap_or(0.0)
+                                        }
                                     });
                                 }
                             }
@@ -1241,17 +1228,18 @@ impl DataService {
 
     // NEW: Method to start transaction with volume tracking
     pub async fn start_transaction_with_volume(&self, transaction_id: String, target_volume: f32, vessel_name: String) {
-        // Capture start inventory from first available device data
-        let inv_start = if let Ok(device_data_map) = self.device_data.lock() {
+        // Capture start inventory AND start VolumeTotal from device data
+        let (inv_start, start_volume_total) = if let Ok(device_data_map) = self.device_data.lock() {
             if let Some((_, data)) = device_data_map.iter().next() {
                 let params = data.get_parameters_as_floats();
-                // Use VolumeInventory as the primary inventory value
-                params.get("VolumeInventory").copied().unwrap_or(0.0)
+                let inv = params.get("VolumeInventory").copied().unwrap_or(0.0);
+                let vol_total = params.get("VolumeTotal").copied().unwrap_or(0.0);
+                (inv, vol_total)
             } else {
-                0.0
+                (0.0, 0.0)
             }
         } else {
-            0.0
+            (0.0, 0.0)
         };
 
         let ts_start = chrono::Utc::now().timestamp();
@@ -1260,22 +1248,25 @@ impl DataService {
         *active_tx = Some(ActiveTransaction {
             transaction_id: transaction_id.clone(),
             target_volume,
-            current_volume: 0.0,
             vessel_name: vessel_name.clone(),
+            start_volume_total,           // NEW: Store start VolumeTotal
+            current_volume_total: start_volume_total, // Initialize with start value
             ts_start,
             ts_end: None,
             inv_start,
             inv_end: None,
         });
 
-        info!("🔗 Started transaction {} for vessel '{}' at {} with target volume: {:.2} L (start inventory: {:.2})", 
-              transaction_id, vessel_name, ts_start, target_volume, inv_start);
+        info!("🔗 Started transaction {} for vessel '{}' at {} with target volume: {:.2} L", 
+              transaction_id, vessel_name, ts_start, target_volume);
+        info!("📊 Start VolumeTotal: {:.2} L, Start inventory: {:.2} L", 
+              start_volume_total, inv_start);
     }
 
-    // NEW: Method to get current active transaction ID (only if volume not reached)
+    // Updated: Get current active transaction ID (only if volume not reached)
     pub async fn get_active_transaction_id(&self) -> Option<String> {
         if let Some(active_tx) = self.active_transaction.lock().await.as_ref() {
-            if active_tx.current_volume < active_tx.target_volume {
+            if active_tx.current_volume_total < active_tx.target_volume {
                 Some(active_tx.transaction_id.clone())
             } else {
                 None
@@ -1285,21 +1276,32 @@ impl DataService {
         }
     }
 
-    // NEW: Method to update volume and check if target reached
-    async fn update_transaction_volume(&self, volume_delta: f32) -> Option<String> {
+    // Updated: Use VolumeTotal to calculate progress
+    async fn update_transaction_with_volume_total(&self, current_volume_total: f32) -> Option<String> {
         let mut active_tx_guard = self.active_transaction.lock().await;
         
         if let Some(active_tx) = active_tx_guard.as_mut() {
-            let old_volume = active_tx.current_volume;
-            active_tx.current_volume += volume_delta;
+            // Update current VolumeTotal
+            active_tx.current_volume_total = current_volume_total;
             
-            let progress_percentage = (active_tx.current_volume / active_tx.target_volume) * 100.0;
+            // Calculate dispensed volume and progress
+            let dispensed_volume = current_volume_total - active_tx.start_volume_total;
+            let progress_percentage = if active_tx.target_volume > 0.0 {
+                (dispensed_volume / active_tx.target_volume) * 100.0
+            } else {
+                0.0
+            };
             
-            info!("📊 Transaction {} volume progress: {:.2}/{:.2} L ({:.1}%)", 
-                  active_tx.transaction_id, active_tx.current_volume, active_tx.target_volume, progress_percentage);
+            info!("📊 Transaction {} progress: VolumeTotal {:.2} → {:.2} L (dispensed: {:.2} L = {:.1}% of {:.2} L target)", 
+                  active_tx.transaction_id, 
+                  active_tx.start_volume_total, 
+                  current_volume_total,
+                  dispensed_volume,
+                  progress_percentage, 
+                  active_tx.target_volume);
             
             // Check if target volume reached
-            if old_volume < active_tx.target_volume && active_tx.current_volume >= active_tx.target_volume {
+            if dispensed_volume >= active_tx.target_volume {
                 let completed_tx_id = active_tx.transaction_id.clone();
                 let vessel_name = active_tx.vessel_name.clone();
                 
@@ -1320,10 +1322,12 @@ impl DataService {
                 };
                 active_tx.inv_end = Some(inv_end);
                 
-                info!("🎯 Transaction {} for vessel '{}' COMPLETED! Target volume {:.2} L reached", 
-                      completed_tx_id, vessel_name, active_tx.target_volume);
-                info!("📊 Inventory change: {:.2} → {:.2} L (Δ {:.2})", 
-                      active_tx.inv_start, inv_end, inv_end - active_tx.inv_start);
+                let duration = ts_end - active_tx.ts_start;
+                
+                info!("🎯 Transaction {} for vessel '{}' COMPLETED! Target {:.2} L reached in {}s", 
+                      completed_tx_id, vessel_name, active_tx.target_volume, duration);
+                info!("📊 Final VolumeTotal: {:.2} L (dispensed: {:.2} L), Inventory change: {:.2} → {:.2} L", 
+                      current_volume_total, dispensed_volume, active_tx.inv_start, inv_end);
                 
                 // Update transaction status in database
                 #[cfg(feature = "sqlite")]
@@ -1339,11 +1343,7 @@ impl DataService {
             }
             
             // Return transaction ID if still active
-            if active_tx.current_volume < active_tx.target_volume {
-                Some(active_tx.transaction_id.clone())
-            } else {
-                None
-            }
+            Some(active_tx.transaction_id.clone())
         } else {
             None
         }
