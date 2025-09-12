@@ -1048,7 +1048,7 @@ impl DataService {
 
                         // Update transaction with current VolumeTotal
                         let active_transaction_id = service.update_transaction_with_volume_total(current_volume_total).await;
-
+                        #[cfg(feature = "sqlite")]
                         // Store to database with transaction ID
                         if let Some(db_service) = &service.database_service {
                             if let Some(uuid) = service.device_address_to_uuid.get(&addr) {
