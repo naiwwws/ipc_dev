@@ -9,7 +9,8 @@ mod storage;
 
 use anyhow::Result;
 use clap::{Arg, Command}; // Add ArgMatches import
-use log::info;
+use log::{info, error};
+use std::sync::Arc;
 
 use services::DataService;
 #[cfg(feature = "sqlite")]
@@ -522,14 +523,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Database: {}", if db_enabled { "enabled" } else { "disabled" });
 
     let mut service = DataService::new(config.clone()).await?;
-    #[cfg(feature = "sqlite")]
-    let mut api_service_handle: Option<crate::services::ApiService> = None;
 
-    // ✅ FIXED: Start API service based on TOML config, not just CLI
+    // ✅ FIXED: Prepare API service but don't start it yet
     #[cfg(feature = "sqlite")]
-    if config.api_server.enabled {
+    let api_service_future = if config.api_server.enabled {
         if let Some(db_service) = service.get_database_service() {
-            let sqlite_manager = db_service.get_sqlite_manager().clone();
+            let sqlite_manager = Arc::new(db_service.get_sqlite_manager().clone());
             
             // FIXED: Create proper Arc for DataService
             let data_service_arc = std::sync::Arc::new(service.clone());
@@ -537,19 +536,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Create API state with proper DataService connection
             let api_state = ApiServiceState::new(
                 config.clone(),
-                sqlite_manager.clone(),
+                sqlite_manager,
                 Some(data_service_arc.clone()) // Pass DataService as Arc
             );
             
             // FIXED: Initialize API service with the state
             let mut api_service = ApiService::new_with_state(api_state)?;
-            api_service.start(config.api_server.port).await?;
-            info!("🌐 HTTP API server started on port {} with DataService connection", config.api_server.port);
-            api_service_handle = Some(api_service);
+            let api_port = config.api_server.port;
+            
+            Some(async move {
+                if let Err(e) = api_service.start(api_port).await {
+                    error!("❌ API service failed to start: {}", e);
+                } else {
+                    info!("🌐 HTTP API server started on port {} with DataService connection", api_port);
+                    
+                    // Keep running until shutdown
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    }
+                }
+            })
         } else {
             info!("⚠️  Database not available for API service");
+            None
         }
-    }
+    } else {
+        None
+    };
     #[cfg(not(feature = "sqlite"))]
     if config.api_server.enabled {
         info!("⚠️  API server disabled - sqlite feature not enabled");
@@ -562,33 +575,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Handle WebSocket commands before other subcommands
     if handle_websocket_commands(&matches, &service).await? {
-        // Stop services before returning
-        #[cfg(feature = "sqlite")]
-        if let Some(mut api_service) = api_service_handle {
-            api_service.stop().await?;
-        }
         return Ok(());
     }
 
     // NEW: Handle GPS commands - add this right after websocket commands
     if let Some(gps_matches) = matches.subcommand_matches("gps") {
         if cli::commands::handle_gps_commands(gps_matches, &service).await? {
-            // Stop services before returning
-            #[cfg(feature = "sqlite")]
-            if let Some(mut api_service) = api_service_handle {
-                api_service.stop().await?;
-            }
             return Ok(());
         }
     }
 
     // Handle other subcommands
     if handle_subcommands(&matches, &mut service).await? {
-        // Stop services before returning
-        #[cfg(feature = "sqlite")]
-        if let Some(mut api_service) = api_service_handle {
-            api_service.stop().await?;
-        }
         return Ok(());
     }
 
@@ -651,33 +649,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("ℹ️  Use --debug flag for automatic data printing");
     }
 
-    // Run service in a select block for graceful shutdown
-    tokio::select! {
-        result = service.run(debug_mode) => {
-            if let Err(e) = result {
-                eprintln!("❌ Service error: {}", e);
+    // Run both services concurrently
+    #[cfg(feature = "sqlite")]
+    if let Some(api_future) = api_service_future {
+        tokio::select! {
+            // Run main data service (includes WebSocket server)
+            result = service.run(debug_mode) => {
+                if let Err(e) = result {
+                    eprintln!("❌ Data service error: {}", e);
+                }
+            }
+            // Run API service
+            _ = api_future => {
+                info!("📝 API service completed");
+            }
+            // Handle shutdown signal
+            _ = shutdown_rx => {
+                info!("🛑 Shutdown signal received");
             }
         }
-        _ = shutdown_rx => {
-            info!("🛑 Shutdown signal received");
+    } else {
+        tokio::select! {
+            // Run main data service only (includes WebSocket server)
+            result = service.run(debug_mode) => {
+                if let Err(e) = result {
+                    eprintln!("❌ Data service error: {}", e);
+                }
+            }
+            // Handle shutdown signal
+            _ = shutdown_rx => {
+                info!("🛑 Shutdown signal received");
+            }
+        }
+    }
+    
+    #[cfg(not(feature = "sqlite"))]
+    {
+        tokio::select! {
+            // Run main data service only (includes WebSocket server)
+            result = service.run(debug_mode) => {
+                if let Err(e) = result {
+                    eprintln!("❌ Data service error: {}", e);
+                }
+            }
+            // Handle shutdown signal
+            _ = shutdown_rx => {
+                info!("🛑 Shutdown signal received");
+            }
         }
     }
 
     // Graceful shutdown sequence
     info!("🔄 Shutting down services...");
     
-    // Stop API service first
-    #[cfg(feature = "sqlite")]
-    if let Some(mut api_service) = api_service_handle {
-        info!("🛑 Stopping API service...");
-        if let Err(e) = api_service.stop().await {
-            eprintln!("❌ Failed to stop API service: {}", e);
-        } else {
-            info!("✅ API service stopped");
-        }
-    }
-
-    // Stop main service
+    // Services will be automatically stopped when the select! branches end
+    
     info!("🛑 Stopping main service...");
     // Add a stop method to DataService if it doesn't exist
     

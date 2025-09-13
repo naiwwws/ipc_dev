@@ -596,17 +596,34 @@ impl DataService {
         // Start WebSocket server if enabled
         if let Some(ws_server) = &self.websocket_server {
             let server_clone = Arc::clone(ws_server);
-            tokio::spawn(async move {
+            let server_handle = tokio::spawn(async move {
                 if let Err(e) = server_clone.start().await {
-                    error!("❌ WebSocket server failed: {}", e);
+                    error!("❌ WebSocket server failed to start: {}", e);
+                    return Err(e);
                 }
+                Ok(())
             });
+            
+            // Give the server a moment to start and check if it failed
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            
+            // Check if the server task completed (which would indicate an error)
+            if server_handle.is_finished() {
+                match server_handle.await {
+                    Ok(Err(e)) => {
+                        error!("❌ WebSocket server startup failed: {}", e);
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        error!("❌ WebSocket server task panicked: {}", e);
+                        return Err(ModbusError::CommunicationError(format!("WebSocket server task failed: {}", e)));
+                    }
+                    _ => {}
+                }
+            }
             
             info!("🔌 WebSocket server: ENABLED on port {}", ws_server.port());
             info!("📡 Flowmeter reading will start when clients connect to /flowmeter/read");
-            
-            // Give the server time to start
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         } else {
             info!("📝 WebSocket server: DISABLED");
             return Err(ModbusError::ConnectionError("WebSocket server required for endpoint-driven mode".to_string()));
@@ -699,6 +716,14 @@ impl DataService {
                 Err(e) => {
                     error!("Failed to read from device {}: {}", device.address(), e);
                 }
+            }
+        }
+        
+        // Flush any pending database writes after initial reading
+        #[cfg(feature = "sqlite")]
+        if let Some(db_service) = &self.database_service {
+            if let Err(e) = db_service.flush_buffer().await {
+                error!("Failed to flush database buffer after initial reading: {}", e);
             }
         }
         

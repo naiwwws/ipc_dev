@@ -82,8 +82,12 @@ impl WebSocketServer {
 
     pub async fn start(&self) -> Result<(), ModbusError> {
         let bind_address = format!("0.0.0.0:{}", self.port);
+        
+        info!("🔄 Attempting to bind WebSocket server to {}", bind_address);
+        
         let listener = TcpListener::bind(&bind_address).await.map_err(|e| {
-            ModbusError::CommunicationError(format!("Failed to bind WebSocket server: {}", e))
+            error!("❌ Failed to bind WebSocket server to {}: {}", bind_address, e);
+            ModbusError::CommunicationError(format!("Failed to bind WebSocket server to {}: {}", bind_address, e))
         })?;
 
         info!("🔌 WebSocket server listening on {}", bind_address);

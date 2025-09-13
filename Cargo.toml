@@ -33,11 +33,14 @@ overflow-checks = true  # Keep overflow checks in debug
 # NEW: Features to reduce unnecessary dependencies
 [features]
 default = ["sqlite", "websocket", "api"]
-sqlite = ["sqlx"]
+sqlite = ["sqlx/sqlite"]
 websocket = ["tokio-tungstenite", "futures-util"]
 api = ["actix-web"]
+network = []
+mqtt = []
 minimal = []            # Minimal build without optional features
 arm-minimal = ["websocket"]        # ARM build without problematic dependencies
+arm-full = ["websocket", "sqlite", "api"]  # ARM build with full features
 
 [dependencies]
 # Core async runtime - minimal features

@@ -76,16 +76,21 @@ pub struct ErrorResponse {
 // API Service state
 #[derive(Clone)]
 pub struct ApiServiceState {
-    pub sqlite_manager: SqliteManager,
+    pub sqlite_manager: Arc<SqliteManager>, // Fix: Use Arc<SqliteManager>
     pub config: Config,
-    pub data_service: Option<Arc<DataService>>, // NEW field
+    pub data_service: Option<Arc<DataService>>,
 }
 
 impl ApiServiceState {
-    pub fn new(config: Config, sqlite_manager: SqliteManager, data_service: Option<Arc<DataService>>) -> Self {
+    // Keep only ONE new method with correct signature
+    pub fn new(
+        config: Config,
+        sqlite_manager: Arc<SqliteManager>,
+        data_service: Option<Arc<DataService>>,
+    ) -> Self {
         Self {
-            sqlite_manager,
             config,
+            sqlite_manager,
             data_service,
         }
     }
@@ -98,30 +103,23 @@ pub struct ApiService {
 }
 
 impl ApiService {
-    pub fn new(config: Config, sqlite_manager: SqliteManager) -> Self {
-        let state = ApiServiceState::new(config, sqlite_manager, None);
-        Self {
-            state,
-            server_handle: None,
-        }
-    }
-    
-    // NEW: Constructor that accepts pre-built state with DataService
+    // Remove the old new method and keep only new_with_state
     pub fn new_with_state(state: ApiServiceState) -> Result<Self, ModbusError> {
         Ok(Self {
             state,
-            server_handle: None,
+            server_handle: None, // Fix: Add missing field
         })
     }
-
+    
     pub async fn start(&mut self, port: u16) -> Result<(), ModbusError> {
-        info!("🌐 Starting HTTP API server on port {}", port);
+        let bind_address = format!("0.0.0.0:{}", port);
+        info!("🚀 Starting API server on {}", bind_address);
         
-        let state_data = web::Data::new(self.state.clone());
+        let state = web::Data::new(self.state.clone());
         
-        let server = HttpServer::new(move || {
+        HttpServer::new(move || {
             App::new()
-                .app_data(state_data.clone())
+                .app_data(state.clone())
                 .wrap(Logger::default())
                 .service(
                     web::scope("/api")
@@ -131,44 +129,21 @@ impl ApiService {
                         .route("/overview/trx_report/{id}", web::get().to(get_transaction))
                 )
         })
-        .bind(format!("0.0.0.0:{}", port))?
-        .run();
-        
-        // Store server handle for graceful shutdown
-        self.server_handle = Some(server.handle());
-        
-        // Start the server in background
-        tokio::spawn(async move {
-            if let Err(e) = server.await {
-                error!("❌ HTTP API server error: {}", e);
-            }
-        });
-        
-        info!("✅ HTTP API server started successfully on port {}", port);
+        .bind(&bind_address)
+        .map_err(|e| ModbusError::CommunicationError(format!("Failed to bind API server: {}", e)))?
+        .run()
+        .await
+        .map_err(|e| ModbusError::CommunicationError(format!("API server error: {}", e)))?;
+
         Ok(())
     }
-
+    
     pub async fn stop(&mut self) -> Result<(), ModbusError> {
-        info!("🛑 Stopping HTTP API server...");
-        
-        if let Some(handle) = self.server_handle.take() {
-            // Use graceful shutdown with timeout
-            tokio::select! {
-                _ = handle.stop(true) => {
-                    info!("✅ HTTP API server stopped gracefully");
-                }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {
-                    warn!("⚠️  HTTP API server shutdown timeout, forcing stop");
-                    handle.stop(false).await;
-                }
-            }
+        info!("🛑 API service stopping...");
+        if let Some(handle) = &self.server_handle {
+            handle.stop(true).await;
         }
-        
         Ok(())
-    }
-
-    pub async fn get_active_transactions(&self) -> Result<Vec<Transaction>, ModbusError> {
-        self.state.sqlite_manager.get_all_transactions(Some(100), None).await
     }
 }
 
